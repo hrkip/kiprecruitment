@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Portal Karir KIP</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+
+  <script>
+    // Paste the deployed Apps Script Web App /exec URL here once.
+    const GAS_API_URL = 'PASTE_YOUR_DEPLOYED_GAS_WEB_APP_URL_HERE';
+
+    (function setupAppsScriptBridge() {
+      'use strict';
+
+      const STORAGE_KEY = 'kip_gas_api_url';
+      const CHANNEL = 'KIP_GAS_RPC';
+      const pendingRequests = new Map();
+      let requestCounter = 0;
+      let bridgeReady = false;
+      let bridgeIframe = null;
+      let bridgeReadyResolver = null;
+
+      function isValidApiUrl(value) {
+        return /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:[?#].*)?$/.test(
+          String(value || '').trim()
+        );
+      }
+
+      function saveApiUrl(value) {
+        if (!isValidApiUrl(value)) return;
+        try { localStorage.setItem(STORAGE_KEY, String(value).trim()); } catch (ignored) {}
+      }
+
+      function readStoredApiUrl() {
+        try { return localStorage.getItem(STORAGE_KEY) || ''; } catch (ignored) { return ''; }
+      }
+
+      function resolveApiUrl() {
+        const queryValue = new URLSearchParams(window.location.search).get('api') || '';
+
+        if (isValidApiUrl(queryValue)) {
+          saveApiUrl(queryValue);
+          return queryValue.trim();
+        }
+
+        if (isValidApiUrl(GAS_API_URL)) {
+          saveApiUrl(GAS_API_URL);
+          return GAS_API_URL.trim();
+        }
+
+        const storedValue = readStoredApiUrl();
+        return isValidApiUrl(storedValue) ? storedValue.trim() : '';
+      }
+
+      function clientBaseUrl() {
+        return new URL('.', window.location.href).href;
+      }
+
+      const apiUrl = resolveApiUrl();
+      window.KIP_API_URL = apiUrl;
+
+      window.buildGitHubPageUrl = function buildGitHubPageUrl(fileName) {
+        const url = new URL(fileName, window.location.href);
+        if (apiUrl) url.searchParams.set('api', apiUrl);
+        return url.href;
+      };
+
+      function initializeIframeBridge() {
+        if (!apiUrl || bridgeIframe) return;
+
+        bridgeIframe = document.createElement('iframe');
+        bridgeIframe.title = 'KIP Apps Script Bridge';
+        bridgeIframe.setAttribute('aria-hidden', 'true');
+        bridgeIframe.style.position = 'fixed';
+        bridgeIframe.style.width = '1px';
+        bridgeIframe.style.height = '1px';
+        bridgeIframe.style.opacity = '0';
+        bridgeIframe.style.pointerEvents = 'none';
+        bridgeIframe.style.border = '0';
+        bridgeIframe.style.left = '-9999px';
+        bridgeIframe.src = apiUrl;
+
+        (document.body || document.documentElement).appendChild(bridgeIframe);
+      }
+
+      window.addEventListener('message', function (event) {
+        if (!bridgeIframe || event.source !== bridgeIframe.contentWindow) return;
+
+        const payload = event.data || {};
+        if (payload.channel !== CHANNEL) return;
+
+        if (payload.type === 'ready') {
+          bridgeReady = true;
+          if (bridgeReadyResolver) {
+            bridgeReadyResolver(true);
+            bridgeReadyResolver = null;
+          }
+          return;
+        }
+
+        if (payload.type !== 'response' || !pendingRequests.has(payload.id)) return;
+
+        const pending = pendingRequests.get(payload.id);
+        pendingRequests.delete(payload.id);
+        clearTimeout(pending.timeoutId);
+
+        if (payload.ok === true) {
+          pending.resolve(payload.result);
+        } else {
+          pending.reject(new Error(payload.error || 'Apps Script request failed.'));
+        }
+      });
+
+      function waitForIframeBridge() {
+        initializeIframeBridge();
+
+        if (bridgeReady) return Promise.resolve(true);
+        if (!bridgeIframe) return Promise.resolve(false);
+
+        return new Promise(function (resolve) {
+          let settled = false;
+
+          bridgeReadyResolver = function (value) {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+          };
+
+          setTimeout(function () {
+            if (settled) return;
+            settled = true;
+            bridgeReadyResolver = null;
+            resolve(false);
+          }, 8000);
+        });
+      }
+
+      function invokeThroughIframe(action, args) {
+        return new Promise(function (resolve, reject) {
+          const id = 'rpc-' + Date.now() + '-' + (++requestCounter);
+          const timeoutId = setTimeout(function () {
+            pendingRequests.delete(id);
+            reject(new Error('Apps Script bridge tidak merespons.'));
+          }, 60000);
+
+          pendingRequests.set(id, { resolve, reject, timeoutId });
+          bridgeIframe.contentWindow.postMessage({
+            channel: CHANNEL,
+            type: 'request',
+            id,
+            action,
+            args,
+            clientBaseUrl: clientBaseUrl()
+          }, '*');
+        });
+      }
+
+      async function invokeThroughFetch(action, args) {
+        const formBody = new URLSearchParams();
+        formBody.set('payload', JSON.stringify({
+          action,
+          args,
+          clientBaseUrl: clientBaseUrl()
+        }));
+
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          body: formBody,
+          redirect: 'follow'
+        });
+
+        const responseText = await response.text();
+        let payload;
+
+        try {
+          payload = JSON.parse(responseText);
+        } catch (error) {
+          throw new Error(
+            'Respons GAS bukan JSON. Pastikan deployment dijalankan sebagai pemilik dan aksesnya diatur ke Anyone.'
+          );
+        }
+
+        if (!payload || payload.ok !== true) {
+          throw new Error(payload && payload.error ? payload.error : 'Respons API tidak valid.');
+        }
+
+        return payload.result;
+      }
+
+      async function invokeApi(action, args) {
+        if (!apiUrl) {
+          throw new Error('GAS API URL belum dikonfigurasi. Isi GAS_API_URL di bagian atas index.html dengan URL deployment /exec.');
+        }
+
+        const ready = await waitForIframeBridge();
+
+        if (ready) {
+          try {
+            return await invokeThroughIframe(action, args);
+          } catch (iframeError) {
+            console.warn('Iframe bridge failed, using fetch fallback.', iframeError);
+          }
+        }
+
+        return invokeThroughFetch(action, args);
+      }
+
+      function createRunner(successHandler, failureHandler) {
+        return new Proxy({}, {
+          get: function (_target, property) {
+            if (property === 'withSuccessHandler') {
+              return function (handler) {
+                return createRunner(handler, failureHandler);
+              };
+            }
+
+            if (property === 'withFailureHandler') {
+              return function (handler) {
+                return createRunner(successHandler, handler);
+              };
+            }
+
+            return function () {
+              const args = Array.prototype.slice.call(arguments);
+
+              invokeApi(String(property), args)
+                .then(function (result) {
+                  if (typeof successHandler === 'function') successHandler(result);
+                })
+                .catch(function (error) {
+                  if (typeof failureHandler === 'function') {
+                    failureHandler(error);
+                  } else if (typeof successHandler === 'function') {
+                    successHandler({ success: false, message: error.message });
+                  } else {
+                    console.error(error);
+                  }
+                });
+            };
+          }
+        });
+      }
+
+      window.google = window.google || {};
+      window.google.script = window.google.script || {};
+      window.google.script.run = createRunner(null, null);
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initializeIframeBridge, { once: true });
+      } else {
+        initializeIframeBridge();
+      }
+    })();
+  </script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; background-color: #fcfcfc; }
+    .input-field { border: 1px solid #d1d5db; padding: 12px; border-radius: 8px; width: 100%; margin-top: 6px; outline: none; background-color: #ffffff; transition: all 0.3s; }
+    .input-field:focus { border-color: #dc2626; box-shadow: 0 10px 15px -3px rgba(220,38,38,0.1); transform: translateY(-3px); }
+    input[type="file"]::file-selector-button { background-color: #111827; color: white; border: none; border-radius: 6px; padding: 8px 16px; cursor: pointer; margin-right: 12px; font-weight: 600; transition: all 0.2s ease; }
+    input[type="file"]::file-selector-button:hover { background-color: #dc2626; }
+  </style>
+</head>
+<body class="text-gray-900 antialiased selection:bg-red-200 selection:text-red-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    function JobPortal() {
+      const [formData, setFormData] = useState({
+        agreement: false,
+        Posisi: '',
+        TeachingAudience: []
+      });
+      const [isSubmitting, setIsSubmitting] = useState(false);
+      const [dialog, setDialog] = useState({ isOpen: false, type: 'success', title: '', message: '' });
+
+      const [showLoginModal, setShowLoginModal] = useState(false);
+      const [loginType, setLoginType] = useState('Admin');
+      const [loginData, setLoginData] = useState({ username: '', password: '', idPelamar: '', rememberMe: false });
+      const [isLoggingIn, setIsLoggingIn] = useState(false);
+      const [loginStatus, setLoginStatus] = useState({ type: '', message: '' }); 
+      const [adminUrl, setAdminUrl] = useState('');
+
+      useEffect(() => {
+        const savedUser = localStorage.getItem('hr_username');
+        const savedPass = localStorage.getItem('hr_password');
+        if (savedUser && savedPass) {
+          setLoginData(prev => ({
+            ...prev,
+            username: savedUser,
+            password: savedPass,
+            rememberMe: true
+          }));
+        }
+      }, []);
+
+      const handleLoginClick = (type) => {
+        setLoginType(type);
+        setShowLoginModal(true);
+        setLoginStatus({ type: '', message: '' });
+        setAdminUrl(''); 
+      };
+
+      const handleLoginSubmit = (e) => {
+        e.preventDefault();
+        setIsLoggingIn(true);
+        setLoginStatus({ type: '', message: '' });
+
+        if (loginType === 'Admin') {
+          google.script.run
+            .withSuccessHandler((res) => {
+              if (res.success) {
+                if (loginData.rememberMe) {
+                  localStorage.setItem('hr_username', loginData.username);
+                  localStorage.setItem('hr_password', loginData.password);
+                } else {
+                  localStorage.removeItem('hr_username');
+                  localStorage.removeItem('hr_password');
+                }
+
+                setLoginStatus({ type: 'success', message: 'Verifikasi sukses! Silakan masuk.' });
+                setAdminUrl(buildGitHubPageUrl('Admin.html'));
+                setIsLoggingIn(false);
+              } else {
+                setLoginStatus({ type: 'error', message: res.message });
+                setIsLoggingIn(false);
+              }
+            })
+            .verifyAdminLogin(loginData.username, loginData.password);
+        } else {
+          google.script.run
+            .withSuccessHandler((res) => {
+              if (res.success) {
+                localStorage.setItem('id_pelamar_aktif', loginData.idPelamar);
+                setLoginStatus({ type: 'success', message: 'ID Valid! Membuka dashboard tes...' });
+                setAdminUrl(buildGitHubPageUrl('Pelamar.html'));
+                setIsLoggingIn(false);
+              } else {
+                setLoginStatus({ type: 'error', message: res.message });
+                setIsLoggingIn(false);
+              }
+            })
+            .verifyPelamarLogin(loginData.idPelamar);
+        }
+      };
+
+      const handleChange = (e) => {
+        const { name, value, type, checked } = e.target;
+        setFormData(prev => ({
+          ...prev,
+          [name]: type === 'checkbox' ? checked : value
+        }));
+      };
+
+      const handleAudienceChange = (value, checked) => {
+        setFormData(prev => {
+          const current = Array.isArray(prev.TeachingAudience) ? prev.TeachingAudience : [];
+          const updated = checked
+            ? [...current, value]
+            : current.filter(item => item !== value);
+
+          return { ...prev, TeachingAudience: updated };
+        });
+      };
+
+      const handleFileChange = (e, fieldName) => {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (f) => {
+            const data = f.target.result.split(',')[1];
+            setFormData(prev => ({
+              ...prev,
+              [fieldName]: { name: file.name, mimeType: file.type, data }
+            }));
+          };
+          reader.readAsDataURL(file);
+        }
+      };
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+
+        if (!formData.CV) {
+          setDialog({
+            isOpen: true,
+            type: 'error',
+            title: 'Berkas Kurang!',
+            message: 'Harap unggah CV Anda.'
+          });
+          return;
+        }
+
+        if (formData.Posisi === 'English Trainer' && (!formData.TeachingAudience || formData.TeachingAudience.length === 0)) {
+          setDialog({
+            isOpen: true,
+            type: 'error',
+            title: 'Pilihan Belum Lengkap',
+            message: 'Pilih minimal satu Teaching Performance Audience.'
+          });
+          return;
+        }
+
+        setIsSubmitting(true);
+
+        const payload = {
+          ...formData,
+          TeachingAudience: Array.isArray(formData.TeachingAudience)
+            ? formData.TeachingAudience.join(', ')
+            : formData.TeachingAudience
+        };
+
+        google.script.run
+          .withSuccessHandler((res) => {
+            if(res.success) {
+              const emailInfo = res.candidateEmailSent
+                ? 'Email konfirmasi telah dikirim ke alamat email Anda.'
+                : 'Lamaran tersimpan, tetapi email konfirmasi belum berhasil dikirim. Tim HR tetap dapat melihat data Anda.';
+
+              setDialog({ 
+                isOpen: true,
+                type: res.candidateEmailSent ? 'success' : 'error',
+                title: res.candidateEmailSent ? 'Lamaran Terkirim! 🎉' : 'Lamaran Tersimpan',
+                message: `ID Pelamar: ${res.applicantId}. ${emailInfo}`
+              });
+              setFormData({ agreement: false, Posisi: '', TeachingAudience: [] });
+              e.target.reset();
+            } else {
+              setDialog({ isOpen: true, type: 'error', title: 'Pengiriman Gagal', message: res.message });
+            }
+            setIsSubmitting(false);
+          })
+          .withFailureHandler((err) => {
+            setDialog({ isOpen: true, type: 'error', title: 'Koneksi Terputus', message: 'Terjadi kesalahan jaringan: ' + err.message });
+            setIsSubmitting(false);
+          })
+          .processForm(payload);
+      };
+
+      return (
+        <div>
+          <nav className="max-w-4xl mx-auto py-6 px-6 flex justify-between items-center border-b border-gray-200">
+            <div className="flex items-center space-x-3 cursor-pointer group">
+              <img src="data:image/webp;base64,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" alt="Logo" className="h-10 w-auto rounded group-hover:opacity-80 transition" />
+              <h1 className="text-xl font-bold tracking-tight hidden sm:block text-gray-900 group-hover:text-red-600 transition">Kampung Inggris Pontianak</h1>
+            </div>
+            <div className="space-x-4 flex items-center">
+              <button onClick={() => handleLoginClick('Pelamar')} className="text-sm font-semibold text-gray-600 hover:text-red-600 transition">Login Pelamar</button>
+              <button onClick={() => handleLoginClick('Admin')} className="px-5 py-2.5 bg-black text-white text-sm font-bold rounded-lg hover:bg-red-600 transition shadow-md hover:shadow-lg transform hover:-translate-y-0.5">Login Admin</button>
+            </div>
+          </nav>
+
+          <main className="max-w-2xl mx-auto py-12 px-6">
+            <header className="mb-10 text-center">
+              <h2 className="text-3xl font-extrabold mb-3 text-black">Formulir Aplikasi</h2>
+              <div className="w-16 h-1 bg-red-600 mx-auto mb-4 rounded-full"></div>
+              <p className="text-gray-500 font-medium">Silakan lengkapi data diri Anda untuk melamar posisi yang tersedia.</p>
+            </header>
+
+            <form onSubmit={handleSubmit} className="space-y-6">
+              <section>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">Full Name <span className="text-red-500">*</span></label>
+                <input type="text" name="Nama" onChange={handleChange} className="input-field" placeholder="Enter your full name" required />
+              </section>
+
+              <section>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">Address <span className="text-red-500">*</span></label>
+                <textarea name="Alamat" onChange={handleChange} className="input-field resize-none" rows="3" placeholder="Enter your address" required></textarea>
+              </section>
+
+              <section>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">Email <span className="text-red-500">*</span></label>
+                <input type="email" name="Email" onChange={handleChange} className="input-field" placeholder="Enter your email" required />
+              </section>
+
+              <section>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">WA Number <span className="text-red-500">*</span></label>
+                <input type="tel" name="NoWA" onChange={handleChange} className="input-field" placeholder="Example: 081234567890" required />
+              </section>
+
+              <section>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">Social Media</label>
+                <input type="text" name="Social Media" onChange={handleChange} className="input-field" placeholder="Instagram, TikTok, Facebook, or other account" />
+              </section>
+
+              <section>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">Position Applied <span className="text-red-500">*</span></label>
+                <select name="Posisi" value={formData.Posisi || ''} onChange={handleChange} className="input-field cursor-pointer" required>
+                  <option value="" disabled>Select position...</option>
+                  <option value="English Trainer">English Trainer</option>
+                  <option value="Admin">Admin</option>
+                  <option value="Team Leader">Team Leader</option>
+                </select>
+              </section>
+
+              {formData.Posisi === 'English Trainer' && (
+                <React.Fragment>
+                  <section className="bg-gray-50 p-5 rounded-xl border border-gray-200">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-3">
+                      Teaching Performance Audience <span className="text-red-500">*</span>
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {[
+                        'SD / Elementary School',
+                        'Middle School',
+                        'High School',
+                        'Public / Adults',
+                        'Academic (TOEFL / IELTS)'
+                      ].map((audience) => (
+                        <label key={audience} className="flex items-center gap-3 bg-white border border-gray-200 rounded-lg p-3 cursor-pointer hover:border-red-400 transition">
+                          <input
+                            type="checkbox"
+                            checked={(formData.TeachingAudience || []).includes(audience)}
+                            onChange={(e) => handleAudienceChange(audience, e.target.checked)}
+                            className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
+                          />
+                          <span className="text-sm font-medium text-gray-700">{audience}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">English Proficiency Level</label>
+                    <select name="Proficiency Level" onChange={handleChange} className="input-field cursor-pointer" defaultValue="">
+                      <option value="">Select proficiency level (optional)</option>
+                      <option value="Basic">Basic</option>
+                      <option value="Elementary">Elementary</option>
+                      <option value="Pre-Intermediate">Pre-Intermediate</option>
+                      <option value="Intermediate">Intermediate</option>
+                      <option value="Upper-Intermediate">Upper-Intermediate</option>
+                      <option value="Advanced">Advanced</option>
+                    </select>
+                  </section>
+
+                  <section>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">Supporting Certificate</label>
+                    <input type="file" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" onChange={(e) => handleFileChange(e, 'Certificate')} className="input-field" />
+                    <p className="text-xs text-gray-400 mt-2">Optional. Upload a certificate that supports your proficiency level.</p>
+                  </section>
+                </React.Fragment>
+              )}
+
+              <section>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">CV <span className="text-red-500">*</span></label>
+                <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => handleFileChange(e, 'CV')} className="input-field" required />
+              </section>
+
+              <section>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700">Portfolio or LinkedIn URL</label>
+                <input type="url" name="Portofolio" onChange={handleChange} className="input-field" placeholder="https://..." />
+              </section>
+
+              <section className="bg-gray-50 p-4 rounded-lg border border-gray-100 mt-8">
+                <label className="flex items-start space-x-3 cursor-pointer">
+                  <input type="checkbox" name="agreement" checked={formData.agreement || false} onChange={handleChange} className="mt-1 w-5 h-5 text-red-600 bg-white border-gray-300 rounded focus:ring-red-500 focus:ring-2 cursor-pointer transition" required />
+                  <span className="text-sm text-gray-600 leading-relaxed">
+                    Dengan ini saya menyatakan bahwa seluruh data dan dokumen yang saya lampirkan adalah <strong>benar dan dapat dipertanggungjawabkan</strong>. Saya bersedia mengikuti seluruh tahapan proses seleksi sesuai aturan perusahaan.
+                  </span>
+                </label>
+              </section>
+
+              <button type="submit" disabled={isSubmitting} className={`w-full py-4 text-white font-bold rounded-xl transition-all duration-300 shadow-md ${isSubmitting ? 'bg-gray-400 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700 hover:shadow-lg transform hover:-translate-y-1'}`}>
+                {isSubmitting ? 'MENGIRIM DATA...' : 'KIRIM LAMARAN'}
+              </button>
+            </form>
+          </main>
+
+          {showLoginModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-sm relative">
+                <button onClick={() => setShowLoginModal(false)} className="absolute top-4 right-4 text-gray-400 hover:text-red-600 font-bold text-2xl transition">×</button>
+
+                <div className="flex flex-col items-center mb-6">
+                  <div className={`w-12 h-12 text-white rounded-full flex items-center justify-center font-bold text-xl mb-3 ${loginType === 'Admin' ? 'bg-black' : 'bg-red-600'}`}>
+                    {loginType === 'Admin' ? 'A' : 'P'}
+                  </div>
+                  <h3 className="text-2xl font-extrabold text-gray-900">Login {loginType}</h3>
+                </div>
+
+                <form onSubmit={handleLoginSubmit} className="space-y-5">
+                  {loginType === 'Admin' ? (
+                    <React.Fragment>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-1">Username</label>
+                        <input type="text" value={loginData.username} onChange={(e) => setLoginData({...loginData, username: e.target.value})} className="input-field" placeholder="Masukkan username" required disabled={adminUrl !== ''} />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-1">Password</label>
+                        <input type="password" value={loginData.password} onChange={(e) => setLoginData({...loginData, password: e.target.value})} className="input-field" placeholder="••••••••" required disabled={adminUrl !== ''} />
+                      </div>
+                      <div className="flex items-center">
+                        <input type="checkbox" id="rememberMe" checked={loginData.rememberMe} onChange={(e) => setLoginData({...loginData, rememberMe: e.target.checked})} className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500 cursor-pointer" disabled={adminUrl !== ''} />
+                        <label htmlFor="rememberMe" className="ml-2 text-sm font-medium text-gray-600 cursor-pointer">Remember Me</label>
+                      </div>
+                    </React.Fragment>
+                  ) : (
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-1">ID Pelamar</label>
+                      <input type="text" value={loginData.idPelamar} onChange={(e) => setLoginData({...loginData, idPelamar: e.target.value})} className="input-field" placeholder="Contoh: PLM-171234567" required disabled={adminUrl !== ''} />
+                    </div>
+                  )}
+
+                  {!adminUrl ? (
+                    <button type="submit" disabled={isLoggingIn} className={`w-full py-3 text-white font-bold rounded-xl transition shadow-md ${isLoggingIn ? 'bg-gray-400 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'}`}>
+                      {isLoggingIn ? 'Memverifikasi...' : 'Verifikasi Akun'}
+                    </button>
+                  ) : (
+                    <a href={adminUrl} target="_top" className="block text-center w-full py-3 bg-green-600 hover:bg-green-700 text-white font-bold rounded-xl transition shadow-lg animate-pulse">
+                      ✅ Mulai / Masuk
+                    </a>
+                  )}
+
+                  {loginStatus.message && (
+                    <div className={`text-center text-sm font-bold mt-3 ${loginStatus.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>
+                      {loginStatus.message}
+                    </div>
+                  )}
+                </form>
+              </div>
+            </div>
+          )}
+
+          {dialog.isOpen && (
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-[70] p-4">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center animate-[fadeIn_0.2s_ease-out] transform transition-all">
+                <div className={`w-20 h-20 rounded-full mx-auto mb-5 flex items-center justify-center text-4xl shadow-inner ${dialog.type === 'success' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
+                  {dialog.type === 'success' ? '✅' : '⚠️'}
+                </div>
+                <h3 className="text-2xl font-black mb-2 text-gray-900">{dialog.title}</h3>
+                <p className="text-gray-600 mb-8 text-sm leading-relaxed">{dialog.message}</p>
+                <button onClick={() => setDialog({ ...dialog, isOpen: false })} className="w-full py-3.5 bg-black text-white font-bold rounded-xl hover:bg-gray-800 transition-all shadow-md transform hover:-translate-y-1">
+                  Tutup & Lanjutkan
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<JobPortal />);
+  </script>
+</body>
+</html>

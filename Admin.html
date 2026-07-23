@@ -1,0 +1,1773 @@
+<!DOCTYPE html>
+
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Dashboard KIP</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+
+  <script>
+    const GAS_API_URL = ''; // Automatically received from index.html and stored in this browser.
+
+    (function setupAppsScriptBridge() {
+      'use strict';
+
+      const STORAGE_KEY = 'kip_gas_api_url';
+      const CHANNEL = 'KIP_GAS_RPC';
+      const pendingRequests = new Map();
+      let requestCounter = 0;
+      let bridgeReady = false;
+      let bridgeIframe = null;
+      let bridgeReadyResolver = null;
+
+      function isValidApiUrl(value) {
+        return /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:[?#].*)?$/.test(
+          String(value || '').trim()
+        );
+      }
+
+      function saveApiUrl(value) {
+        if (!isValidApiUrl(value)) return;
+        try { localStorage.setItem(STORAGE_KEY, String(value).trim()); } catch (ignored) {}
+      }
+
+      function readStoredApiUrl() {
+        try { return localStorage.getItem(STORAGE_KEY) || ''; } catch (ignored) { return ''; }
+      }
+
+      function resolveApiUrl() {
+        const queryValue = new URLSearchParams(window.location.search).get('api') || '';
+
+        if (isValidApiUrl(queryValue)) {
+          saveApiUrl(queryValue);
+          return queryValue.trim();
+        }
+
+        if (isValidApiUrl(GAS_API_URL)) {
+          saveApiUrl(GAS_API_URL);
+          return GAS_API_URL.trim();
+        }
+
+        const storedValue = readStoredApiUrl();
+        return isValidApiUrl(storedValue) ? storedValue.trim() : '';
+      }
+
+      function clientBaseUrl() {
+        return new URL('.', window.location.href).href;
+      }
+
+      const apiUrl = resolveApiUrl();
+      window.KIP_API_URL = apiUrl;
+
+      window.buildGitHubPageUrl = function buildGitHubPageUrl(fileName) {
+        const url = new URL(fileName, window.location.href);
+        if (apiUrl) url.searchParams.set('api', apiUrl);
+        return url.href;
+      };
+
+      function initializeIframeBridge() {
+        if (!apiUrl || bridgeIframe) return;
+
+        bridgeIframe = document.createElement('iframe');
+        bridgeIframe.title = 'KIP Apps Script Bridge';
+        bridgeIframe.setAttribute('aria-hidden', 'true');
+        bridgeIframe.style.position = 'fixed';
+        bridgeIframe.style.width = '1px';
+        bridgeIframe.style.height = '1px';
+        bridgeIframe.style.opacity = '0';
+        bridgeIframe.style.pointerEvents = 'none';
+        bridgeIframe.style.border = '0';
+        bridgeIframe.style.left = '-9999px';
+        bridgeIframe.src = apiUrl;
+
+        (document.body || document.documentElement).appendChild(bridgeIframe);
+      }
+
+      window.addEventListener('message', function (event) {
+        if (!bridgeIframe || event.source !== bridgeIframe.contentWindow) return;
+
+        const payload = event.data || {};
+        if (payload.channel !== CHANNEL) return;
+
+        if (payload.type === 'ready') {
+          bridgeReady = true;
+          if (bridgeReadyResolver) {
+            bridgeReadyResolver(true);
+            bridgeReadyResolver = null;
+          }
+          return;
+        }
+
+        if (payload.type !== 'response' || !pendingRequests.has(payload.id)) return;
+
+        const pending = pendingRequests.get(payload.id);
+        pendingRequests.delete(payload.id);
+        clearTimeout(pending.timeoutId);
+
+        if (payload.ok === true) {
+          pending.resolve(payload.result);
+        } else {
+          pending.reject(new Error(payload.error || 'Apps Script request failed.'));
+        }
+      });
+
+      function waitForIframeBridge() {
+        initializeIframeBridge();
+
+        if (bridgeReady) return Promise.resolve(true);
+        if (!bridgeIframe) return Promise.resolve(false);
+
+        return new Promise(function (resolve) {
+          let settled = false;
+
+          bridgeReadyResolver = function (value) {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+          };
+
+          setTimeout(function () {
+            if (settled) return;
+            settled = true;
+            bridgeReadyResolver = null;
+            resolve(false);
+          }, 8000);
+        });
+      }
+
+      function invokeThroughIframe(action, args) {
+        return new Promise(function (resolve, reject) {
+          const id = 'rpc-' + Date.now() + '-' + (++requestCounter);
+          const timeoutId = setTimeout(function () {
+            pendingRequests.delete(id);
+            reject(new Error('Apps Script bridge tidak merespons.'));
+          }, 60000);
+
+          pendingRequests.set(id, { resolve, reject, timeoutId });
+          bridgeIframe.contentWindow.postMessage({
+            channel: CHANNEL,
+            type: 'request',
+            id,
+            action,
+            args,
+            clientBaseUrl: clientBaseUrl()
+          }, '*');
+        });
+      }
+
+      async function invokeThroughFetch(action, args) {
+        const formBody = new URLSearchParams();
+        formBody.set('payload', JSON.stringify({
+          action,
+          args,
+          clientBaseUrl: clientBaseUrl()
+        }));
+
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          body: formBody,
+          redirect: 'follow'
+        });
+
+        const responseText = await response.text();
+        let payload;
+
+        try {
+          payload = JSON.parse(responseText);
+        } catch (error) {
+          throw new Error(
+            'Respons GAS bukan JSON. Pastikan deployment dijalankan sebagai pemilik dan aksesnya diatur ke Anyone.'
+          );
+        }
+
+        if (!payload || payload.ok !== true) {
+          throw new Error(payload && payload.error ? payload.error : 'Respons API tidak valid.');
+        }
+
+        return payload.result;
+      }
+
+      async function invokeApi(action, args) {
+        if (!apiUrl) {
+          throw new Error('GAS API URL belum tersedia. Buka index.html terlebih dahulu dari repository GitHub Pages yang sama.');
+        }
+
+        const ready = await waitForIframeBridge();
+
+        if (ready) {
+          try {
+            return await invokeThroughIframe(action, args);
+          } catch (iframeError) {
+            console.warn('Iframe bridge failed, using fetch fallback.', iframeError);
+          }
+        }
+
+        return invokeThroughFetch(action, args);
+      }
+
+      function createRunner(successHandler, failureHandler) {
+        return new Proxy({}, {
+          get: function (_target, property) {
+            if (property === 'withSuccessHandler') {
+              return function (handler) {
+                return createRunner(handler, failureHandler);
+              };
+            }
+
+            if (property === 'withFailureHandler') {
+              return function (handler) {
+                return createRunner(successHandler, handler);
+              };
+            }
+
+            return function () {
+              const args = Array.prototype.slice.call(arguments);
+
+              invokeApi(String(property), args)
+                .then(function (result) {
+                  if (typeof successHandler === 'function') successHandler(result);
+                })
+                .catch(function (error) {
+                  if (typeof failureHandler === 'function') {
+                    failureHandler(error);
+                  } else if (typeof successHandler === 'function') {
+                    successHandler({ success: false, message: error.message });
+                  } else {
+                    console.error(error);
+                  }
+                });
+            };
+          }
+        });
+      }
+
+      window.google = window.google || {};
+      window.google.script = window.google.script || {};
+      window.google.script.run = createRunner(null, null);
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initializeIframeBridge, { once: true });
+      } else {
+        initializeIframeBridge();
+      }
+    })();
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; overflow-x: hidden; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .toggle-checkbox:checked { right: 0; border-color: #10B981; }
+    .toggle-checkbox:checked + .toggle-label { background-color: #10B981; }
+  </style>
+
+  <script>
+    window.addEventListener('error', function(event) {
+      var root = document.getElementById('root');
+      if (!root) return;
+
+      root.innerHTML =
+        '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f3f4f6;padding:24px;">' +
+          '<div style="max-width:720px;width:100%;background:#fff;border:1px solid #fecaca;border-radius:16px;padding:24px;box-shadow:0 10px 25px rgba(0,0,0,.08);">' +
+            '<h2 style="font-size:22px;font-weight:800;color:#b91c1c;margin:0 0 12px;">Admin Dashboard gagal dimuat</h2>' +
+            '<p style="color:#4b5563;margin:0 0 12px;">Terjadi kesalahan JavaScript. Detail:</p>' +
+            '<pre style="white-space:pre-wrap;word-break:break-word;background:#f9fafb;border-radius:10px;padding:14px;color:#111827;">' +
+              String(event.message || 'Unknown error') +
+            '</pre>' +
+          '</div>' +
+        '</div>';
+    });
+  </script>
+
+</head>
+<body class="text-gray-900 antialiased selection:bg-red-200 selection:text-red-900">
+  <div id="root">
+    <div class="min-h-screen flex items-center justify-center bg-gray-100">
+      <div class="bg-white border border-gray-200 shadow-sm rounded-2xl p-8 text-center">
+        <div class="text-3xl mb-3">⏳</div>
+        <p class="font-bold text-gray-800">Memuat Admin Dashboard...</p>
+        <p class="text-sm text-gray-500 mt-1">Mohon tunggu beberapa saat.</p>
+      </div>
+    </div>
+  </div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    function AdminDashboard() {
+      // --- STATE UTAMA ---
+      const ROLES = ['English Trainer', 'Admin', 'Team Leader'];
+      const FIXED_FORM_FIELDS = [
+        { id: 1, label: 'Full Name', name: 'Nama', type: 'text', active: true },
+        { id: 2, label: 'Address', name: 'Alamat', type: 'textarea', active: true },
+        { id: 3, label: 'Email', name: 'Email', type: 'email', active: true },
+        { id: 4, label: 'WA Number', name: 'NoWA', type: 'tel', active: true },
+        { id: 5, label: 'Social Media', name: 'Social Media', type: 'text', active: true },
+        { id: 6, label: 'Position Applied', name: 'Posisi', type: 'select', active: true },
+        { id: 7, label: 'Teaching Audience', name: 'TeachingAudience', type: 'text', active: true },
+        { id: 8, label: 'Proficiency Level', name: 'Proficiency Level', type: 'select', active: true },
+        { id: 9, label: 'Certificate', name: 'Certificate', type: 'file', active: true },
+        { id: 10, label: 'CV', name: 'CV', type: 'file', active: true },
+        { id: 11, label: 'Portfolio / LinkedIn', name: 'Portofolio', type: 'url', active: true }
+      ];
+
+      const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+      const [activeTab, setActiveTab] = useState('dashboard');
+      const [applicants, setApplicants] = useState([]);
+      const [isLoadingData, setIsLoadingData] = useState(true);
+      const [filterStatus, setFilterStatus] = useState('Semua');
+      const [selectedDetail, setSelectedDetail] = useState(null);
+      const [updatingIds, setUpdatingIds] = useState({});
+      const [selectedRole, setSelectedRole] = useState('English Trainer');
+
+      const [interviewModal, setInterviewModal] = useState({
+        isOpen: false, app: null, type: 'online', datetime: '', location: ''
+      });
+
+      // Fixed fields are retained only for applicant table rendering.
+      const [formFields] = useState(FIXED_FORM_FIELDS);
+
+      // --- STATE PENILAIAN KOGNITIF ---
+      const [kognitifQuestions, setKognitifQuestions] = useState([]);
+      const [isLoadingKognitif, setIsLoadingKognitif] = useState(true);
+      const [isSavingKognitif, setIsSavingKognitif] = useState(false);
+      const [kognitifTab, setKognitifTab] = useState('soal');
+      const [passingGrade, setPassingGrade] = useState({ rekomen: 60, sangatRekomen: 85 });
+      const [isSavingGrade, setIsSavingGrade] = useState(false);
+      const [hasilJawaban, setHasilJawaban] = useState([]);
+      const [hasilHeaders, setHasilHeaders] = useState([]);
+      const [isLoadingHasil, setIsLoadingHasil] = useState(true);
+
+      // --- STATE INTERVIEW ---
+      const [interviewQuestions, setInterviewQuestions] = useState([]);
+      const [isLoadingInterview, setIsLoadingInterview] = useState(true);
+      const [isSavingInterview, setIsSavingInterview] = useState(false);
+      const [gradingModal, setGradingModal] = useState({ isOpen: false, app: null, answers: {} });
+      const [isSubmittingGrade, setIsSubmittingGrade] = useState(false);
+      const [interviewTab, setInterviewTab] = useState('soal');
+      const [interviewResults, setInterviewResults] = useState([]);
+
+      // --- STATE ONBOARDING ---
+      const [onboardingTab, setOnboardingTab] = useState('editor');
+      const [clauses, setClauses] = useState([]);
+      const [signedList, setSignedList] = useState([]);
+      const [isSavingClause, setIsSavingClause] = useState(false);
+
+      // --- STATE ASSIGNED ADMIN EMAIL ---
+      const [adminNotifications, setAdminNotifications] = useState([]);
+      const [isSavingAdmins, setIsSavingAdmins] = useState(false);
+
+      const [dialog, setDialog] = useState({
+        isOpen: false, type: 'alert', title: '', message: '', onConfirm: null
+      });
+
+      useEffect(() => {
+        fetchData();
+        fetchAdminNotifications();
+      }, []);
+
+      useEffect(() => {
+        fetchRoleBasedData(selectedRole);
+      }, [selectedRole]);
+
+      const fetchData = () => {
+        setIsLoadingData(true);
+        google.script.run
+          .withSuccessHandler((res) => {
+            if (res.success) setApplicants(res.data);
+            else setDialog({ isOpen: true, type: 'alert', title: 'Peringatan', message: res.message });
+            setIsLoadingData(false);
+          })
+          .withFailureHandler((err) => {
+            setDialog({ isOpen: true, type: 'alert', title: 'Gagal', message: err.message });
+            setIsLoadingData(false);
+          })
+          .getApplicantsData();
+      };
+
+      const fetchRoleBasedData = (role) => {
+        fetchKognitifQuestions(role);
+        fetchPassingGrade(role);
+        fetchHasilJawaban(role);
+        fetchInterviewQuestions(role);
+        fetchInterviewResults(role);
+        fetchOnboardingData(role);
+      };
+
+      const fetchKognitifQuestions = (role = selectedRole) => {
+        setIsLoadingKognitif(true);
+        google.script.run
+          .withSuccessHandler((res) => {
+            if (res.success) setKognitifQuestions(res.data);
+            setIsLoadingKognitif(false);
+          })
+          .withFailureHandler(() => setIsLoadingKognitif(false))
+          .getKognitifQuestions(role);
+      };
+
+      const fetchPassingGrade = (role = selectedRole) => {
+        google.script.run.withSuccessHandler(res => {
+          if (res.success) setPassingGrade(res.data);
+        }).getPassingGrade(role);
+      };
+
+      const fetchHasilJawaban = (role = selectedRole) => {
+        setIsLoadingHasil(true);
+        google.script.run.withSuccessHandler(res => {
+          if (res.success) {
+            setHasilJawaban(res.data);
+            setHasilHeaders(res.headers);
+          }
+          setIsLoadingHasil(false);
+        }).getHasilJawaban(role);
+      };
+
+      const handleSavePassingGrade = () => {
+        setIsSavingGrade(true);
+        google.script.run.withSuccessHandler(res => {
+          if (res.success) {
+            setDialog({ isOpen: true, type: 'success', title: 'Berhasil', message: `Passing Grade ${selectedRole} berhasil diperbarui!` });
+          } else {
+            setDialog({ isOpen: true, type: 'alert', title: 'Gagal', message: res.message });
+          }
+          setIsSavingGrade(false);
+        }).savePassingGrade(selectedRole, passingGrade);
+      };
+
+      const executeStatusUpdate = (app, newStatus, interviewDetails = null) => {
+        const id = app['ID Pelamar'] || app.id;
+
+        setApplicants(current =>
+          current.map(item =>
+            (item['ID Pelamar'] || item.id) === id
+              ? { ...item, Status: newStatus }
+              : item
+          )
+        );
+
+        setUpdatingIds(prev => ({ ...prev, [id]: true }));
+
+        google.script.run
+          .withSuccessHandler((res) => {
+            setUpdatingIds(prev => ({ ...prev, [id]: false }));
+
+            if (!res.success) {
+              setDialog({ isOpen: true, type: 'alert', title: 'Gagal', message: res.message });
+              fetchData();
+              return;
+            }
+
+            if (!res.emailSent) {
+              setDialog({
+                isOpen: true,
+                type: 'alert',
+                title: 'Status Tersimpan',
+                message: 'Status berhasil diperbarui, tetapi email kandidat tidak terkirim: ' + (res.emailMessage || 'Email tidak tersedia.')
+              });
+            }
+          })
+          .withFailureHandler((err) => {
+            setUpdatingIds(prev => ({ ...prev, [id]: false }));
+            setDialog({ isOpen: true, type: 'alert', title: 'Gagal', message: err.message });
+            fetchData();
+          })
+          .updateApplicantStatusAndNotify(id, newStatus, interviewDetails);
+      };
+
+      const handleStatusChange = (app, newStatus) => {
+        if (newStatus === 'Wawancara') {
+          setInterviewModal({
+            isOpen: true,
+            app,
+            type: 'online',
+            datetime: '',
+            location: ''
+          });
+        } else {
+          executeStatusUpdate(app, newStatus);
+        }
+      };
+
+      const handleSendInterview = () => {
+        const { app, type, datetime, location } = interviewModal;
+
+        if (!datetime || !location.trim()) {
+          setDialog({
+            isOpen: true,
+            type: 'alert',
+            title: 'Data Belum Lengkap',
+            message: 'Isi jadwal wawancara dan link/lokasi terlebih dahulu.'
+          });
+          return;
+        }
+
+        executeStatusUpdate(app, 'Wawancara', { type, datetime, location });
+
+        const noWa = app['NoWA'] || app['No. WhatsApp'] || app.wa;
+        if (noWa) {
+          let formattedNo = noWa.toString().replace(/\D/g, '');
+          if (formattedNo.startsWith('0')) formattedNo = '62' + formattedNo.substring(1);
+
+          const formatTanggal = new Date(datetime).toLocaleString('id-ID', {
+            dateStyle: 'full',
+            timeStyle: 'short'
+          });
+
+          let message =
+            `Halo ${app['Nama'] || 'Kandidat'}, selamat! Anda lolos ke tahap Wawancara untuk posisi ${app['Posisi'] || '-'}.\n\n` +
+            `Jadwal: *${formatTanggal} WIB*\n`;
+
+          if (type === 'online') {
+            message += `Format: *Online (Google Meet)*\n🌐 Link Meeting: ${location}\n\n`;
+          } else {
+            message += `Format: *Tatap Muka (Offline)*\n🏢 Lokasi/Alamat: ${location}\n\n`;
+          }
+
+          message += 'Harap konfirmasi kehadiran Anda dengan membalas pesan ini. Terima kasih.';
+          window.open(`https://wa.me/${formattedNo}?text=${encodeURIComponent(message)}`, '_blank');
+        }
+
+        setInterviewModal({ isOpen: false, app: null, type: 'online', datetime: '', location: '' });
+      };
+
+      const getStatusColorClass = (status) => {
+        switch(status) {
+          case 'Baru': return 'bg-blue-50 text-blue-700 border-blue-200';
+          case 'Penilaian Cognitive': return 'bg-purple-50 text-purple-700 border-purple-200';
+          case 'Selesai Test Kognitif': return 'bg-indigo-100 text-indigo-800 border-indigo-300';
+          case 'Wawancara': return 'bg-yellow-50 text-yellow-700 border-yellow-200';
+          case 'Sudah Wawancara': return 'bg-amber-100 text-amber-800 border-amber-300';
+          case 'Onboarding': return 'bg-orange-50 text-orange-700 border-orange-200';
+          case 'Active': return 'bg-green-50 text-green-700 border-green-200';
+          default: return 'bg-gray-50 text-gray-700 border-gray-200';
+        }
+      };
+
+      const handleAddQuestion = () => {
+        const newId = kognitifQuestions.length > 0
+          ? Math.max(...kognitifQuestions.map(q => Number(q.id) || 0)) + 1
+          : 1;
+
+        setKognitifQuestions([
+          ...kognitifQuestions,
+          { id: newId, question: '', optionA: '', optionB: '', optionC: '', optionD: '', scoreA: 1, scoreB: 2, scoreC: 3, scoreD: 4 }
+        ]);
+      };
+
+      const handleUpdateQuestion = (id, key, value) => {
+        setKognitifQuestions(
+          kognitifQuestions.map(q => q.id === id ? { ...q, [key]: value } : q)
+        );
+      };
+
+      const handleDeleteQuestion = (id) => {
+        setDialog({
+          isOpen: true,
+          type: 'confirm',
+          title: 'Hapus Soal?',
+          message: `Hapus soal ini dari template ${selectedRole}?`,
+          onConfirm: () => setKognitifQuestions(kognitifQuestions.filter(q => q.id !== id))
+        });
+      };
+
+      const handleSaveKognitif = () => {
+        setIsSavingKognitif(true);
+        google.script.run.withSuccessHandler((res) => {
+          setIsSavingKognitif(false);
+
+          if (res.success) {
+            setDialog({ isOpen: true, type: 'success', title: 'Berhasil', message: `Soal kognitif ${selectedRole} tersimpan!` });
+          } else {
+            setDialog({ isOpen: true, type: 'alert', title: 'Gagal', message: res.message });
+          }
+        }).saveKognitifQuestions(selectedRole, kognitifQuestions);
+      };
+
+      const fetchInterviewQuestions = (role = selectedRole) => {
+        setIsLoadingInterview(true);
+        google.script.run.withSuccessHandler(res => {
+          if (res.success) setInterviewQuestions(res.data);
+          setIsLoadingInterview(false);
+        }).getInterviewQuestions(role);
+      };
+
+      const handleAddInterviewQ = () => {
+        const newId = interviewQuestions.length > 0
+          ? Math.max(...interviewQuestions.map(q => Number(q.id) || 0)) + 1
+          : 1;
+
+        setInterviewQuestions([
+          ...interviewQuestions,
+          { id: newId, question: 'Ketik pertanyaan wawancara baru...' }
+        ]);
+      };
+
+      const handleUpdateInterviewQ = (id, val) => {
+        setInterviewQuestions(
+          interviewQuestions.map(q => q.id === id ? { ...q, question: val } : q)
+        );
+      };
+
+      const handleDeleteInterviewQ = (id) => {
+        setDialog({
+          isOpen: true,
+          type: 'confirm',
+          title: 'Hapus Pertanyaan?',
+          message: `Hapus pertanyaan wawancara ${selectedRole} ini?`,
+          onConfirm: () => setInterviewQuestions(interviewQuestions.filter(q => q.id !== id))
+        });
+      };
+
+      const handleSaveInterviewQs = () => {
+        setIsSavingInterview(true);
+        google.script.run.withSuccessHandler(res => {
+          setIsSavingInterview(false);
+
+          if (res.success) {
+            setDialog({ isOpen: true, type: 'success', title: 'Berhasil', message: `Pertanyaan wawancara ${selectedRole} disimpan!` });
+          } else {
+            setDialog({ isOpen: true, type: 'alert', title: 'Gagal', message: res.message });
+          }
+        }).saveInterviewQuestions(selectedRole, interviewQuestions);
+      };
+
+      const handleOpenGrading = (app) => {
+        const initAns = {};
+        interviewQuestions.forEach(q => initAns[q.id] = 0);
+        setGradingModal({ isOpen: true, app, answers: initAns });
+      };
+
+      const fetchInterviewResults = (role = selectedRole) => {
+        google.script.run.withSuccessHandler(res => {
+          if (res.success) setInterviewResults(res.data);
+        }).getInterviewResults(role);
+      };
+
+      const fetchOnboardingData = (role = selectedRole) => {
+        google.script.run.withSuccessHandler(res => {
+          if (res.success) setClauses(res.data);
+        }).getOnboardingClauses(role);
+
+        google.script.run.withSuccessHandler(res => {
+          if (res.success) setSignedList(res.data);
+        }).getOnboardingSignatures(role);
+      };
+
+      const handleScoreChange = (qId, score) => {
+        setGradingModal(prev => ({
+          ...prev,
+          answers: { ...prev.answers, [qId]: score }
+        }));
+      };
+
+      const handleSubmitGrading = () => {
+        setIsSubmittingGrade(true);
+
+        const total = Object.values(gradingModal.answers)
+          .reduce((sum, value) => sum + Number(value || 0), 0);
+
+        google.script.run.withSuccessHandler(res => {
+          setIsSubmittingGrade(false);
+
+          if (res.success) {
+            setDialog({
+              isOpen: true,
+              type: 'success',
+              title: 'Nilai Tersimpan!',
+              message: `Total Skor Kandidat: ${total}`
+            });
+
+            setGradingModal({ isOpen: false, app: null, answers: {} });
+            fetchInterviewResults(selectedRole);
+            fetchData();
+          } else {
+            setDialog({ isOpen: true, type: 'alert', title: 'Gagal', message: res.message });
+          }
+        }).submitInterviewResult(
+          gradingModal.app['ID Pelamar'] || gradingModal.app.id,
+          gradingModal.app['Nama'] || gradingModal.app.name,
+          gradingModal.app['Posisi'] || gradingModal.app.posisi,
+          total,
+          gradingModal.answers
+        );
+      };
+
+      const handleSaveOnboarding = () => {
+        setIsSavingClause(true);
+
+        google.script.run.withSuccessHandler(res => {
+          setIsSavingClause(false);
+
+          if (res.success) {
+            setDialog({
+              isOpen: true,
+              type: 'success',
+              title: 'Berhasil',
+              message: `Template Perjanjian ${selectedRole} tersimpan!`
+            });
+          } else {
+            setDialog({ isOpen: true, type: 'alert', title: 'Gagal', message: res.message });
+          }
+        }).saveOnboardingClauses(selectedRole, clauses);
+      };
+
+      const fetchAdminNotifications = () => {
+        google.script.run.withSuccessHandler(res => {
+          if (res.success) setAdminNotifications(res.data);
+        }).getAdminNotifications();
+      };
+
+      const handleSaveAdminNotifications = () => {
+        setIsSavingAdmins(true);
+
+        google.script.run.withSuccessHandler(res => {
+          setIsSavingAdmins(false);
+
+          if (res.success) {
+            setDialog({
+              isOpen: true,
+              type: 'success',
+              title: 'Berhasil',
+              message: 'Daftar admin penerima email berhasil disimpan.'
+            });
+          } else {
+            setDialog({ isOpen: true, type: 'alert', title: 'Gagal', message: res.message });
+          }
+        }).saveAdminNotifications(adminNotifications);
+      };
+
+      const getWaLink = (noWa, namaPelamar, idPelamar, status, posisi) => {
+        if (!noWa) return '#';
+
+        let formattedNo = noWa.toString().replace(/\D/g, '');
+        if (formattedNo.startsWith('0')) {
+          formattedNo = '62' + formattedNo.substring(1);
+        }
+
+        const webUrl = new URL('index.html', window.location.href).href;
+        const role = posisi || '-';
+        let message = `Halo ${namaPelamar}, status lamaran Anda untuk posisi ${role} diperbarui menjadi: ${status}.`;
+
+        if (status === 'Penilaian Cognitive') {
+          message =
+            `Halo ${namaPelamar}, selamat! Anda masuk ke tahap Penilaian Kognitif untuk posisi ${role}.\n\n` +
+            `Silakan login ke portal:\n🌐 Link: ${webUrl}\n🔑 ID Pelamar: *${idPelamar}*\n\n` +
+            'Waktu pengerjaan adalah 30 menit.';
+        } else if (status === 'Selesai Test Kognitif') {
+          message = `Halo ${namaPelamar}, jawaban tes kognitif Anda untuk posisi ${role} sudah kami terima. Mohon tunggu informasi tahap berikutnya.`;
+        } else if (status === 'Wawancara') {
+          message = `Halo ${namaPelamar}, selamat! Anda masuk ke tahap Wawancara untuk posisi ${role}. Jadwal detail akan diinformasikan oleh HR.`;
+        } else if (status === 'Sudah Wawancara') {
+          message = `Halo ${namaPelamar}, proses wawancara Anda untuk posisi ${role} telah dicatat. Mohon menunggu keputusan HR.`;
+        } else if (status === 'Onboarding') {
+          message =
+            `Halo ${namaPelamar}, selamat! Anda masuk ke tahap Onboarding untuk posisi ${role}.\n\n` +
+            `Silakan login untuk meninjau dan menandatangani perjanjian digital:\n🌐 Link: ${webUrl}\n🔑 ID Pelamar: *${idPelamar}*`;
+        } else if (status === 'Active') {
+          message = `Halo ${namaPelamar}, selamat! Status Anda sekarang Active sebagai ${role}. Selamat bergabung di Kampung Inggris Pontianak.`;
+        }
+
+        return `https://wa.me/${formattedNo}?text=${encodeURIComponent(message)}`;
+      };
+
+      const getSafeData = (app) => ({
+        id: app['ID Pelamar'] || app.id || '-',
+        date: app['Timestamp'] || app.date ? new Date(app['Timestamp'] || app.date).toLocaleDateString('id-ID') : '-',
+        status: app['Status'] || app.status || 'Baru',
+        name: app['Nama'] || app.name || 'Tanpa Nama',
+        alamat: app['Alamat'] || app.alamat || '-',
+        email: app['Email'] || app.email || '-',
+        wa: app['NoWA'] || app['No. WhatsApp'] || app.wa || '',
+        posisi: app['Posisi'] || app.posisi || '-',
+        cv: app['CV'] || app.cvLink || '',
+        porto: app['Portofolio'] || app.portofolioLink || ''
+      });
+const activeApplicants = applicants.filter(a => a['ID Pelamar']); 
+
+      const totalPelamar = activeApplicants.length;
+      const pelamarBaru = activeApplicants.filter(a => (a['Status'] || 'Baru') === 'Baru').length;
+      const sedangDiproses = activeApplicants.filter(a => ['Penilaian Cognitive', 'Selesai Test Kognitif', 'Wawancara', 'Sudah Wawancara', 'Onboarding'].includes(a['Status'])).length;
+      const totalActive = activeApplicants.filter(a => a['Status'] === 'Active').length;
+
+      const filteredApplicants = filterStatus === 'Semua' 
+        ? activeApplicants : activeApplicants.filter(app => (app['Status'] || 'Baru') === filterStatus);
+
+      const handleLogout = () => {
+        setDialog({
+          isOpen: true,
+          type: 'confirm',
+          title: 'Keluar Sistem',
+          message: 'Yakin ingin keluar dari Dashboard HR?',
+          onConfirm: () => { window.top.location.href = buildGitHubPageUrl('index.html'); }
+        });
+      };
+
+      const renderDynamicCell = (app, field) => {
+        const val = app[field.name];
+        if (val === undefined || val === '') return <span className="text-gray-400 italic text-[10px]">-</span>;
+        if (field.type === 'file' || field.type === 'url') {
+          if (val.toString().startsWith('http')) {
+            return <a href={val} target="_blank" className="inline-block px-3 py-1.5 bg-black text-white rounded text-xs font-semibold hover:bg-red-600 transition shadow-sm">Buka Link</a>;
+          }
+          return <span className="text-xs text-gray-500">Link Invalid</span>;
+        }
+        if (field.type === 'tel') {
+          let no = val.toString().replace(/\D/g, '');
+          if (no.startsWith('0')) no = '62' + no.substring(1);
+          const waHref = getWaLink(val, app['Nama'] || app.name || 'Kandidat', app['ID Pelamar'], app['Status'] || 'Baru', app['Posisi'] || app.posisi);
+          return (
+            <div className="flex items-center space-x-2">
+              <span className="text-xs font-medium">{val}</span>
+              <a href={waHref} target="_blank" title="Chat WA" className="bg-green-500 text-white p-1 rounded hover:bg-green-600 shadow-sm">
+                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/></svg>
+              </a>
+            </div>
+          );
+        }
+        if (field.type === 'textarea') {
+          return (
+            <div className="text-xs line-clamp-2 cursor-pointer hover:text-red-600 w-48 whitespace-normal" title="Lihat penuh" onClick={() => setSelectedDetail({ id: app['ID Pelamar'], title: field.label, content: val })}>
+              {val}
+            </div>
+          );
+        }
+        if (field.type === 'select') {
+          return <span className="bg-gray-100 text-gray-700 px-2 py-1 rounded text-[11px] font-medium border">{val}</span>;
+        }
+        return <div className="text-xs font-medium">{val}</div>;
+      };
+
+      // 👇 KOMPONEN VISUAL TABEL BULAT (CIRCULAR PROGRESS) 👇
+      const CircularProgress = ({ percentage, label, colorClass }) => {
+        const sqSize = 80;
+        const strokeWidth = 8;
+        const radius = (sqSize - strokeWidth) / 2;
+        const viewBox = `0 0 ${sqSize} ${sqSize}`;
+        const dashArray = radius * Math.PI * 2;
+        const dashOffset = dashArray - (dashArray * percentage) / 100;
+
+        return (
+          <div className="flex flex-col items-center group cursor-pointer">
+            <div className="relative flex items-center justify-center">
+              <svg width={sqSize} height={sqSize} viewBox={viewBox} className="transform -rotate-90 drop-shadow-sm">
+                <circle className="text-gray-100 stroke-current" strokeWidth={strokeWidth} cx={sqSize/2} cy={sqSize/2} r={radius} fill="transparent" />
+                <circle className={`${colorClass} stroke-current transition-all duration-1000 ease-out`} strokeWidth={strokeWidth} strokeLinecap="round" strokeDasharray={dashArray} strokeDashoffset={dashOffset} cx={sqSize/2} cy={sqSize/2} r={radius} fill="transparent" />
+              </svg>
+              <div className="absolute text-sm font-black text-gray-800">{percentage}%</div>
+            </div>
+            <span className="text-[10px] font-bold text-gray-500 mt-3 uppercase tracking-wider group-hover:text-black transition">{label}</span>
+          </div>
+        );
+      };
+      // 👆 BATAS KOMPONEN TABEL BULAT 👆
+
+      const renderDashboard = () => {
+        const activeFields = formFields.filter(f => f.active);
+
+        return (
+          <div className="animate-[fadeIn_0.3s_ease-out]">
+            <div className="mb-8 flex justify-between items-end">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-800">Overview Rekrutmen</h2>
+                <p className="text-sm text-gray-500">Kelola dan update status pelamar real-time.</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+              <div className="bg-white p-6 rounded-xl shadow-sm border-l-4 border-black"><p className="text-sm font-semibold text-gray-500 uppercase">Total Pelamar</p><h3 className="text-3xl font-bold mt-2">{isLoadingData ? '...' : totalPelamar}</h3></div>
+              <div className="bg-white p-6 rounded-xl shadow-sm border-l-4 border-blue-500"><p className="text-sm font-semibold text-gray-500 uppercase">Pelamar Baru</p><h3 className="text-3xl font-bold text-blue-600 mt-2">{isLoadingData ? '...' : pelamarBaru}</h3></div>
+              <div className="bg-white p-6 rounded-xl shadow-sm border-l-4 border-yellow-500"><p className="text-sm font-semibold text-gray-500 uppercase">Dalam Proses</p><h3 className="text-3xl font-bold text-yellow-600 mt-2">{isLoadingData ? '...' : sedangDiproses}</h3></div>
+              <div className="bg-white p-6 rounded-xl shadow-sm border-l-4 border-green-500"><p className="text-sm font-semibold text-gray-500 uppercase">Diterima (Active)</p><h3 className="text-3xl font-bold text-green-600 mt-2">{isLoadingData ? '...' : totalActive}</h3></div>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+              <div className="p-6 border-b border-gray-100 flex flex-wrap gap-4 justify-between items-center bg-gray-50">
+                <h3 className="text-lg font-bold text-gray-800">Daftar Pelamar Terbaru</h3>
+                <div className="flex gap-3 items-center">
+                  <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="border border-gray-300 text-sm rounded-lg outline-none p-2">
+                    <option value="Semua">Semua Status</option>
+                    <option value="Baru">Status: Baru</option>
+                    <option value="Penilaian Cognitive">Status: Penilaian Cognitive</option>
+                    <option value="Selesai Test Kognitif">Status: Selesai Test Kognitif</option>
+                    <option value="Wawancara">Status: Wawancara</option>
+                    <option value="Sudah Wawancara">Status: Sudah Wawancara</option>
+                    <option value="Onboarding">Status: Onboarding</option>
+                    <option value="Active">Status: Active</option>
+                  </select>
+                  <button onClick={fetchData} disabled={isLoadingData} className={`px-4 py-2 text-white text-sm font-semibold rounded ${isLoadingData ? 'bg-gray-400' : 'bg-black hover:bg-red-600'}`}>{isLoadingData ? 'Memuat...' : 'Refresh Data'}</button>
+                </div>
+              </div>
+              
+              <div className="overflow-x-auto pb-4 min-h-[300px]">
+                <table className="w-full text-left border-collapse min-w-max">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-500 text-xs uppercase border-b border-gray-200">
+                      <th className="p-4 font-semibold whitespace-nowrap sticky left-0 bg-gray-50 z-10 shadow-[1px_0_0_0_#e5e7eb]">ID & Tanggal</th>
+                      {activeFields.map(field => <th key={field.id} className="p-4 font-semibold whitespace-nowrap">{field.label}</th>)}
+                      <th className="p-4 font-semibold whitespace-nowrap">Status Rekrutmen</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-sm divide-y divide-gray-100">
+                    {isLoadingData && <tr><td colSpan={activeFields.length + 2} className="p-8 text-center text-gray-500">Sedang mengambil data...</td></tr>}
+                    {!isLoadingData && filteredApplicants.length === 0 && <tr><td colSpan={activeFields.length + 2} className="p-8 text-center text-gray-500">Data tidak ditemukan.</td></tr>}
+
+                    {!isLoadingData && filteredApplicants.map((app, index) => {
+                      const appId = app['ID Pelamar'];
+                      const appStatus = app['Status'] || 'Baru';
+                      const isUpdating = updatingIds[appId];
+
+                      return (
+                        <tr key={index} className="hover:bg-red-50 transition group">
+                          <td className="p-4 whitespace-nowrap bg-white group-hover:bg-red-50 sticky left-0 z-10 shadow-[1px_0_0_0_#e5e7eb]">
+                            <div className="font-bold text-gray-900">{appId || '-'}</div>
+                            <div className="text-xs text-gray-500 mt-1">{app['Timestamp'] ? new Date(app['Timestamp']).toLocaleDateString('id-ID') : '-'}</div>
+                          </td>
+
+                          {activeFields.map(field => (
+                            <td key={field.id} className="p-4 whitespace-nowrap">{renderDynamicCell(app, field)}</td>
+                          ))}
+
+                          <td className="p-4 whitespace-nowrap align-top">
+                            <select 
+                              value={appStatus}
+                              onChange={(e) => handleStatusChange(app, e.target.value)}
+                              disabled={isUpdating}
+                              className={`w-full text-xs font-bold px-2 py-1.5 rounded border outline-none cursor-pointer transition-all duration-300
+                                ${getStatusColorClass(appStatus)}
+                                ${isUpdating ? 'opacity-50 cursor-wait' : 'hover:shadow-sm'}
+                              `}
+                            >
+                              <option value="Baru">Baru</option>
+                              <option value="Penilaian Cognitive">Penilaian Cognitive</option>
+                              <option value="Selesai Test Kognitif">Selesai Test Kognitif</option>
+                              <option value="Wawancara">Wawancara</option>
+                              <option value="Sudah Wawancara">Sudah Wawancara</option>
+                              <option value="Onboarding">Onboarding</option>
+                              <option value="Active">Active</option>
+                            </select>
+                            {isUpdating && <div className="text-[10px] text-gray-400 mt-1 animate-pulse">Menyimpan...</div>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      const renderKognitifMaster = () => (
+        <div className="animate-[fadeIn_0.3s_ease-out]">
+          <div className="mb-6 flex flex-wrap gap-4 justify-between items-end">
+            <div>
+              <h2 className="text-2xl font-bold text-gray-800">Modul Penilaian Kognitif</h2>
+              <p className="text-sm text-gray-500">Kelola soal ujian, standar kelulusan, dan hasil berdasarkan posisi.</p>
+            </div>
+            <select value={selectedRole} onChange={(e) => setSelectedRole(e.target.value)} className="border border-gray-300 bg-white rounded-lg p-2 text-sm font-bold outline-none">
+              {ROLES.map(role => <option key={role} value={role}>{role}</option>)}
+            </select>
+          </div>
+
+          <div className="flex space-x-2 mb-8 bg-gray-200 p-1 rounded-xl inline-flex">
+            <button onClick={() => setKognitifTab('soal')} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${kognitifTab === 'soal' ? 'bg-white text-black shadow-sm' : 'text-gray-500 hover:text-black'}`}>🛠️ Custom Pertanyaan</button>
+            <button onClick={() => setKognitifTab('grade')} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${kognitifTab === 'grade' ? 'bg-white text-black shadow-sm' : 'text-gray-500 hover:text-black'}`}>🎯 Passing Grade</button>
+            <button onClick={() => setKognitifTab('hasil')} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${kognitifTab === 'hasil' ? 'bg-white text-black shadow-sm' : 'text-gray-500 hover:text-black'}`}>📊 Hasil Jawaban</button>
+          </div>
+
+          {kognitifTab === 'soal' && (
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-lg font-bold">Daftar Soal Ujian — {selectedRole}</h3>
+                <button onClick={handleSaveKognitif} disabled={isSavingKognitif} className={`px-4 py-2 text-white font-bold rounded-lg transition ${isSavingKognitif ? 'bg-gray-400' : 'bg-red-600 hover:bg-red-700'}`}>
+                  {isSavingKognitif ? 'Menyimpan...' : '💾 Simpan Soal'}
+                </button>
+              </div>
+              
+              <div className="space-y-6">
+                {isLoadingKognitif ? <div className="text-center py-10 text-gray-500">Memuat soal...</div> : 
+                 kognitifQuestions.map((q, index) => (
+                  <div key={q.id} className="bg-gray-50 p-6 rounded-xl border border-gray-200 relative group">
+                    <button onClick={() => handleDeleteQuestion(q.id)} className="absolute top-4 right-4 text-gray-400 hover:text-red-600 p-2 bg-white rounded-full opacity-0 group-hover:opacity-100 transition shadow-sm">🗑️</button>
+                    
+                    <div className="flex gap-4 mb-4">
+                      <div className="bg-black text-white w-8 h-8 rounded flex items-center justify-center font-bold shrink-0">{index + 1}</div>
+                      <div className="w-full">
+                        <textarea value={q.question} onChange={(e) => handleUpdateQuestion(q.id, 'question', e.target.value)} className="w-full border-gray-300 rounded-lg p-3 text-sm outline-none focus:border-red-500 resize-y" rows="2" placeholder="Masukkan soal di sini..."></textarea>
+
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-white p-4 rounded-lg border border-gray-100 ml-12 shadow-sm">
+                  {['A', 'B', 'C', 'D'].map(opt => (
+                    <div key={opt} className="flex gap-2 items-start">
+                      <div className="w-full">
+                        <label className="text-xs font-bold text-gray-600">Opsi {opt}</label>
+                        <input type="text" value={q[`option${opt}`]} onChange={(e) => handleUpdateQuestion(q.id, `option${opt}`, e.target.value)} className="w-full mt-1 border border-gray-300 rounded p-2 text-sm outline-none" />
+                      </div>
+                      <div className="w-20 shrink-0">
+                        <label className="text-xs font-bold text-gray-600">Skor</label>
+                        <select value={q[`score${opt}`]} onChange={(e) => handleUpdateQuestion(q.id, `score${opt}`, parseInt(e.target.value))} className="w-full mt-1 border border-gray-300 rounded p-2 text-sm outline-none focus:border-red-500">
+                          <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                        </select>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {!isLoadingKognitif && (
+              <button onClick={handleAddQuestion} className="w-full py-4 border-2 border-dashed border-gray-300 text-gray-500 font-bold rounded-xl hover:border-red-500 hover:text-red-500 hover:bg-gray-50 transition flex justify-center items-center gap-2">
+                ➕ Tambah Soal Baru
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {kognitifTab === 'grade' && (
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 max-w-2xl">
+          <h3 className="text-lg font-bold mb-2">Atur Standar Kelulusan (%)</h3>
+          <p className="text-sm text-gray-500 mb-6">Status kandidat (Terekomendasi / Sangat Direkomendasikan) akan dihitung otomatis oleh sistem berdasarkan persentase skor maksimal dari soal yang aktif.</p>
+          
+          <div className="space-y-6">
+            <div className="bg-blue-50 p-4 rounded-xl border border-blue-100">
+              <label className="block text-sm font-bold text-blue-900 mb-2">Batas Bawah "Terekomendasi"</label>
+              <div className="flex items-center gap-3">
+                <input type="number" min="0" max="100" value={passingGrade.rekomen} onChange={(e) => setPassingGrade({...passingGrade, rekomen: e.target.value})} className="w-24 p-2 border border-blue-300 rounded-lg text-lg font-bold text-center outline-none" />
+                <span className="font-bold text-blue-900">%</span>
+              </div>
+              <p className="text-xs text-blue-700 mt-2">Kandidat dengan skor di bawah nilai ini otomatis berstatus <strong>"Tidak Cocok"</strong>.</p>
+            </div>
+
+            <div className="bg-green-50 p-4 rounded-xl border border-green-100">
+              <label className="block text-sm font-bold text-green-900 mb-2">Batas Bawah "Sangat Direkomendasikan"</label>
+              <div className="flex items-center gap-3">
+                <input type="number" min="0" max="100" value={passingGrade.sangatRekomen} onChange={(e) => setPassingGrade({...passingGrade, sangatRekomen: e.target.value})} className="w-24 p-2 border border-green-300 rounded-lg text-lg font-bold text-center outline-none" />
+                <span className="font-bold text-green-900">%</span>
+              </div>
+              <p className="text-xs text-green-700 mt-2">Kandidat dengan skor sama atau lebih besar dari nilai ini akan mendapat label prioritas utama.</p>
+            </div>
+
+            <button onClick={handleSavePassingGrade} disabled={isSavingGrade} className={`w-full py-3 text-white font-bold rounded-xl transition ${isSavingGrade ? 'bg-gray-400' : 'bg-black hover:bg-gray-900'}`}>
+              {isSavingGrade ? 'Menyimpan...' : 'Simpan Passing Grade'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {kognitifTab === 'hasil' && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="p-6 border-b flex justify-between items-center bg-gray-50">
+            <h3 className="text-lg font-bold text-gray-800">Database Jawaban Pelamar</h3>
+            <button onClick={() => fetchHasilJawaban(selectedRole)} className="px-4 py-2 bg-black text-white text-sm font-semibold rounded hover:bg-red-600">Refresh Data</button>
+          </div>
+          <div className="overflow-x-auto pb-4 min-h-[300px]">
+            <table className="w-full text-left border-collapse min-w-max">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 text-xs uppercase border-b border-gray-200">
+                  {hasilHeaders.length > 0 ? (
+                    hasilHeaders.map((header, idx) => (
+                      <th key={idx} className={`p-4 font-semibold whitespace-nowrap ${idx === 0 ? 'sticky left-0 bg-gray-50 z-10 shadow-[1px_0_0_0_#e5e7eb]' : ''}`}>
+                        {header}
+                      </th>
+                    ))
+                  ) : (
+                    <th className="p-4 font-semibold">Data Hasil Tes</th>
+                  )}
+                </tr>
+              </thead>
+              <tbody className="text-sm divide-y divide-gray-100">
+                {isLoadingHasil && <tr><td colSpan="10" className="p-8 text-center text-gray-500">Memuat hasil tes...</td></tr>}
+                {!isLoadingHasil && hasilJawaban.length === 0 && <tr><td colSpan="10" className="p-8 text-center text-gray-500">Belum ada kandidat yang mensubmit tes.</td></tr>}
+                
+                {!isLoadingHasil && hasilJawaban.map((ans, idx) => (
+                  <tr key={idx} className="hover:bg-red-50 transition">
+                    {hasilHeaders.map((header, hIdx) => {
+                      const val = ans[header];
+                      if (header === 'Status Rekomendasi') {
+                         return (
+                           <td key={hIdx} className="p-4 whitespace-nowrap font-bold">
+                             <span className={`px-2 py-1 rounded text-xs ${val === 'Sangat Direkomendasikan' ? 'bg-green-100 text-green-800' : val === 'Terekomendasi' ? 'bg-blue-100 text-blue-800' : 'bg-red-100 text-red-800'}`}>{val}</span>
+                           </td>
+                         );
+                      }
+                      if (header === 'Total Score' || header === 'Persentase') {
+                         return <td key={hIdx} className="p-4 whitespace-nowrap font-bold text-black">{val}</td>;
+                      }
+                      return (
+                        <td key={hIdx} className={`p-4 whitespace-nowrap ${hIdx === 0 ? 'sticky left-0 bg-white shadow-[1px_0_0_0_#e5e7eb] font-bold' : ''}`}>
+                          {val || '-'}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  // =============== INTERVIEW BUILDER VIEW ===============
+  const renderInterviewMaster = () => (
+    <div className="animate-[fadeIn_0.3s_ease-out]">
+      <div className="mb-6 flex flex-wrap gap-4 justify-between items-end">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800">Modul Penilaian Wawancara</h2>
+          <p className="text-sm text-gray-500">Kelola pertanyaan dan live grading berdasarkan posisi.</p>
+        </div>
+        <select value={selectedRole} onChange={(e) => setSelectedRole(e.target.value)} className="border border-gray-300 bg-white rounded-lg p-2 text-sm font-bold outline-none">
+          {ROLES.map(role => <option key={role} value={role}>{role}</option>)}
+        </select>
+      </div>
+
+      {/* SUB-NAVIGATION PILLS */}
+      <div className="flex space-x-2 mb-8 bg-gray-200 p-1 rounded-xl inline-flex">
+        <button onClick={() => setInterviewTab('soal')} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${interviewTab === 'soal' ? 'bg-white text-black shadow-sm' : 'text-gray-500 hover:text-black'}`}>🛠️ Custom Pertanyaan</button>
+        <button onClick={() => setInterviewTab('penilaian')} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${interviewTab === 'penilaian' ? 'bg-white text-black shadow-sm' : 'text-gray-500 hover:text-black'}`}>🎙️ Penilaian Langsung</button>
+      </div>
+
+      {/* TAB 1: CUSTOM PERTANYAAN (UI LAMA) */}
+      {interviewTab === 'soal' && (
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="text-lg font-bold">Daftar Pertanyaan Wawancara — {selectedRole}</h3>
+            <button onClick={handleSaveInterviewQs} disabled={isSavingInterview} className={`px-6 py-2 text-white font-bold rounded-lg shadow-md transition ${isSavingInterview ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
+              {isSavingInterview ? 'Menyimpan...' : '💾 Simpan Pertanyaan'}
+            </button>
+          </div>
+          <div className="space-y-4">
+            {isLoadingInterview ? <div className="text-center py-10 text-gray-500">Memuat data...</div> : 
+             interviewQuestions.map((q, index) => (
+              <div key={q.id} className="flex gap-4 items-center bg-gray-50 p-4 rounded-xl border border-gray-100 group">
+                <div className="bg-blue-600 text-white w-8 h-8 rounded-full flex items-center justify-center font-bold shrink-0">{index + 1}</div>
+                <input type="text" value={q.question} onChange={(e) => handleUpdateInterviewQ(q.id, e.target.value)} className="flex-1 bg-transparent border-b border-gray-300 focus:border-blue-600 outline-none px-2 py-1 text-sm font-medium" />
+                <button onClick={() => handleDeleteInterviewQ(q.id)} className="text-gray-400 hover:text-red-600 p-2 opacity-0 group-hover:opacity-100 transition">🗑️</button>
+              </div>
+            ))}
+            {!isLoadingInterview && (
+              <button onClick={handleAddInterviewQ} className="w-full py-4 border-2 border-dashed border-gray-300 text-gray-500 font-bold rounded-xl hover:border-blue-600 hover:text-blue-600 hover:bg-blue-50 transition">
+                ➕ Tambah Pertanyaan Wawancara
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 2: PENILAIAN LANGSUNG (TABEL KANDIDAT WAWANCARA) */}
+      {interviewTab === 'penilaian' && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="p-6 border-b bg-gray-50">
+            <h3 className="text-lg font-bold text-gray-800">Daftar Kandidat (Tahap Wawancara)</h3>
+            <p className="text-xs text-gray-500 mt-1">Hanya menampilkan kandidat dengan status "Wawancara".</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse min-w-max">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 text-xs uppercase border-b">
+                  <th className="p-4 font-semibold">ID Pelamar</th>
+                  <th className="p-4 font-semibold">Nama Kandidat</th>
+                  <th className="p-4 font-semibold">Posisi</th>
+                  <th className="p-4 font-semibold text-center">Skor Wawancara</th>
+                  <th className="p-4 font-semibold text-center">Aksi Penilaian</th>
+                </tr>
+              </thead>
+              <tbody className="text-sm divide-y divide-gray-100">
+                {activeApplicants.filter(app => app['Posisi'] === selectedRole && ['Wawancara', 'Sudah Wawancara', 'Onboarding', 'Active'].includes(app['Status'])).length === 0 ? (
+                  <tr><td colSpan="5" className="p-10 text-center text-gray-500 font-medium">Belum ada kandidat di tahap wawancara saat ini.</td></tr>
+                ) : (
+                  activeApplicants.filter(app => app['Posisi'] === selectedRole && ['Wawancara', 'Sudah Wawancara', 'Onboarding', 'Active'].includes(app['Status'])).map((app, idx) => {
+                    const appId = app['ID Pelamar'] || app.id;
+                    
+                    // Cari hasil wawancara kandidat terlebih dahulu.
+                    const result = interviewResults.find(
+                      r => String(r.idPelamar).trim() === String(appId).trim()
+                    );
+                    const hasInterviewed = !!result;
+
+                    // Gunakan Max Skor tersimpan jika tersedia.
+                    const maxScore = result && Number(result.maxScore) > 0
+                      ? Number(result.maxScore)
+                      : interviewQuestions.length * 3;
+                    
+                    // Format Skor: 30/30 atau '-'
+                    const scoreText = hasInterviewed ? `${result.totalScore} / ${maxScore}` : '-';
+
+                    return (
+                      <tr key={idx} className="hover:bg-blue-50 transition">
+                        <td className="p-4 font-bold text-gray-900">{appId || '-'}</td>
+                        <td className="p-4 font-medium">{app['Nama'] || app.name || '-'}</td>
+                        <td className="p-4"><span className="bg-gray-100 text-gray-700 px-3 py-1 rounded-lg text-xs font-bold border">{app['Posisi'] || app.posisi || '-'}</span></td>
+                        <td className="p-4 text-center font-black text-blue-700 text-base">{scoreText}</td>
+                        <td className="p-4 text-center">
+                          <button 
+                            onClick={() => handleOpenGrading(app)} 
+                            disabled={hasInterviewed || interviewQuestions.length === 0}
+                            className={`px-5 py-2 text-white text-xs font-bold rounded-lg shadow-md transition transform ${hasInterviewed ? 'bg-gray-400 cursor-not-allowed' : interviewQuestions.length === 0 ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 hover:scale-105'}`}
+                          >
+                            {hasInterviewed ? 'Selesai ✅' : interviewQuestions.length === 0 ? 'Buat Soal Dulu' : 'Mulai Wawancara 🎙️'}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderOnboardingMaster = () => (
+    <div className="animate-[fadeIn_0.3s_ease-out]">
+      <div className="mb-6 flex flex-wrap gap-4 justify-between items-end">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800">Management Onboarding</h2>
+          <p className="text-sm text-gray-500">Kelola perjanjian dan status tanda tangan berdasarkan posisi.</p>
+        </div>
+        <select value={selectedRole} onChange={(e) => setSelectedRole(e.target.value)} className="border border-gray-300 bg-white rounded-lg p-2 text-sm font-bold outline-none">
+          {ROLES.map(role => <option key={role} value={role}>{role}</option>)}
+        </select>
+      </div>
+      
+      <div className="flex space-x-2 mb-6 bg-gray-200 p-1 rounded-xl inline-flex">
+        <button onClick={() => setOnboardingTab('editor')} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${onboardingTab === 'editor' ? 'bg-white shadow-sm text-black' : 'text-gray-500 hover:text-black'}`}>📝 Editor Perjanjian</button>
+        <button onClick={() => setOnboardingTab('status')} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${onboardingTab === 'status' ? 'bg-white shadow-sm text-black' : 'text-gray-500 hover:text-black'}`}>✅ Status TTD</button>
+      </div>
+
+      {/* TAB 1: EDITOR PASAL KONTRAK */}
+      {onboardingTab === 'editor' && (
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="text-lg font-bold">Pasal Perjanjian Kerja — {selectedRole}</h3>
+            <button onClick={() => {
+              const newClauses = [...clauses, { id: clauses.length + 1, title: 'Judul Pasal Baru', content: 'Isi pasal di sini...' }];
+              setClauses(newClauses);
+            }} className="text-blue-600 font-bold text-sm hover:underline">+ Tambah Pasal</button>
+          </div>
+          <div className="space-y-4">
+            {clauses.map((c, i) => (
+              <div key={i} className="p-4 bg-gray-50 rounded-xl border border-gray-200 relative group">
+                <input value={c.title} onChange={(e) => {
+                  const nc = [...clauses]; nc[i].title = e.target.value; setClauses(nc);
+                }} className="w-full font-bold mb-3 p-2 border-b-2 border-gray-300 focus:border-blue-600 bg-transparent outline-none transition" placeholder="Judul Pasal" />
+                <textarea value={c.content} onChange={(e) => {
+                  const nc = [...clauses]; nc[i].content = e.target.value; setClauses(nc);
+                }} className="w-full text-sm p-2 bg-white border border-gray-200 rounded-lg outline-none focus:border-blue-600 h-24 resize-y transition" placeholder="Isi pasal..." />
+                <button onClick={() => {
+                  if(confirm('Hapus pasal ini?')) setClauses(clauses.filter((_, idx) => idx !== i));
+                }} className="absolute top-4 right-4 text-red-600 opacity-0 group-hover:opacity-100 transition p-2">🗑️</button>
+              </div>
+            ))}
+            <button
+              onClick={handleSaveOnboarding}
+              disabled={isSavingClause}
+              className={`w-full py-4 text-white font-bold rounded-xl transition shadow-md ${
+                isSavingClause
+                  ? 'bg-gray-400 cursor-not-allowed'
+                  : 'bg-black hover:bg-gray-900'
+              }`}
+            >
+              {isSavingClause ? 'Menyimpan...' : '💾 Simpan Template Perjanjian'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 2: TABEL STATUS TANDA TANGAN */}
+      {onboardingTab === 'status' && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="p-6 border-b bg-gray-50 flex justify-between items-center">
+            <div>
+              <h3 className="text-lg font-bold text-gray-800">Status Penandatanganan Kontrak</h3>
+              <p className="text-xs text-gray-500 mt-1">Daftar kandidat yang telah menyetujui perjanjian onboarding.</p>
+            </div>
+            <button onClick={() => fetchOnboardingData(selectedRole)} className="px-4 py-2 bg-black text-white text-sm font-semibold rounded hover:bg-red-600 transition">Refresh Data</button>
+          </div>
+          <div className="overflow-x-auto pb-4 min-h-[300px]">
+            <table className="w-full text-left border-collapse min-w-max">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 text-xs uppercase border-b border-gray-200">
+                  <th className="p-4 font-semibold">ID Pelamar</th>
+                  <th className="p-4 font-semibold">Nama Tanda Tangan</th>
+                  <th className="p-4 font-semibold">Waktu Disetujui</th>
+                  <th className="p-4 font-semibold">Status</th>
+                  <th className="p-4 font-semibold">Dokumen PDF</th>
+                </tr>
+              </thead>
+              <tbody className="text-sm divide-y divide-gray-100">
+                {signedList.length === 0 ? (
+                  <tr><td colSpan="5" className="p-10 text-center text-gray-500 font-medium">Belum ada kandidat yang menandatangani kontrak.</td></tr>
+                ) : (
+                  signedList.map((s, i) => (
+                    <tr key={i} className="hover:bg-green-50 transition">
+                      <td className="p-4 font-bold text-gray-900">{s[0]}</td>
+                      <td className="p-4 font-medium text-gray-800">{s[1]}</td>
+                      <td className="p-4 text-gray-500">{new Date(s[3]).toLocaleString('id-ID')}</td>
+                      <td className="p-4">
+                        <span className="bg-green-100 text-green-800 px-3 py-1 rounded-lg text-xs font-bold border border-green-200">
+                          {s[4] || 'SIGNED'}
+                        </span>
+                      </td>
+                      <td className="p-4">
+                        {s[5] ? (
+                          <a href={s[5]} target="_blank" className="inline-block px-4 py-1.5 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700 shadow-sm transition">
+                            Buka Dokumen 📄
+                          </a>
+                        ) : (
+                          <span className="text-gray-400 italic text-xs">-</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+
+  // =============== ASSIGNED ADMIN EMAIL VIEW ===============
+  const renderAdminNotifications = () => {
+    const addAdminNotification = () => {
+      setAdminNotifications(current => [
+        ...current,
+        {
+          id: `new-${Date.now()}`,
+          name: '',
+          email: '',
+          active: true,
+          englishTrainer: true,
+          admin: false,
+          teamLeader: false
+        }
+      ]);
+    };
+
+    const updateAdminNotification = (index, field, value) => {
+      setAdminNotifications(current =>
+        current.map((item, itemIndex) =>
+          itemIndex === index ? { ...item, [field]: value } : item
+        )
+      );
+    };
+
+    const deleteAdminNotification = (index) => {
+      const item = adminNotifications[index] || {};
+      const adminLabel = item.name || item.email || 'admin ini';
+
+      setDialog({
+        isOpen: true,
+        type: 'confirm',
+        title: 'Hapus Admin Penerima?',
+        message: `Hapus ${adminLabel} dari daftar penerima email?`,
+        onConfirm: () => {
+          setAdminNotifications(current =>
+            current.filter((_, itemIndex) => itemIndex !== index)
+          );
+        }
+      });
+    };
+
+    return (
+      <div className="animate-[fadeIn_0.3s_ease-out]">
+        <div className="mb-6 flex flex-wrap gap-4 justify-between items-end">
+          <div>
+            <h2 className="text-2xl font-bold text-gray-800">Assigned Admin Email</h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Tentukan admin yang menerima notifikasi otomatis ketika ada pelamar baru.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={fetchAdminNotifications}
+              className="px-4 py-2 bg-white border border-gray-300 text-gray-700 text-sm font-bold rounded-lg hover:bg-gray-50 transition"
+            >
+              ↻ Refresh
+            </button>
+            <button
+              type="button"
+              onClick={addAdminNotification}
+              className="px-4 py-2 bg-black text-white text-sm font-bold rounded-lg hover:bg-red-600 transition"
+            >
+              + Tambah Admin
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 mb-6">
+          <p className="text-sm text-blue-900 leading-relaxed">
+            Admin yang berstatus <strong>Active</strong> akan menerima email berdasarkan posisi yang dicentang.
+            Data disimpan ke sheet <strong>AdminNotifications</strong>.
+          </p>
+        </div>
+
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[980px] text-left border-collapse">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 text-xs uppercase border-b border-gray-200">
+                  <th className="p-4 font-semibold">Nama Admin</th>
+                  <th className="p-4 font-semibold">Email</th>
+                  <th className="p-4 font-semibold text-center">Active</th>
+                  <th className="p-4 font-semibold text-center">English Trainer</th>
+                  <th className="p-4 font-semibold text-center">Admin</th>
+                  <th className="p-4 font-semibold text-center">Team Leader</th>
+                  <th className="p-4 font-semibold text-center">Aksi</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-gray-100">
+                {adminNotifications.length === 0 ? (
+                  <tr>
+                    <td colSpan="7" className="p-10 text-center text-gray-500">
+                      Belum ada admin penerima email. Klik <strong>Tambah Admin</strong> untuk membuat data baru.
+                    </td>
+                  </tr>
+                ) : (
+                  adminNotifications.map((item, index) => (
+                    <tr key={item.id || index} className="hover:bg-red-50 transition">
+                      <td className="p-4">
+                        <input
+                          type="text"
+                          value={item.name || ''}
+                          onChange={(e) => updateAdminNotification(index, 'name', e.target.value)}
+                          placeholder="Nama admin"
+                          className="w-full min-w-[170px] border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-red-500"
+                        />
+                      </td>
+
+                      <td className="p-4">
+                        <input
+                          type="email"
+                          value={item.email || ''}
+                          onChange={(e) => updateAdminNotification(index, 'email', e.target.value)}
+                          placeholder="admin@email.com"
+                          className="w-full min-w-[230px] border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-red-500"
+                        />
+                      </td>
+
+                      {[
+                        ['active', 'Aktif/nonaktif'],
+                        ['englishTrainer', 'English Trainer'],
+                        ['admin', 'Admin'],
+                        ['teamLeader', 'Team Leader']
+                      ].map(([field, label]) => (
+                        <td key={field} className="p-4 text-center">
+                          <label className="inline-flex items-center justify-center cursor-pointer" title={label}>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(item[field])}
+                              onChange={(e) => updateAdminNotification(index, field, e.target.checked)}
+                              className="w-5 h-5 text-green-600 border-gray-300 rounded focus:ring-green-500 cursor-pointer"
+                            />
+                          </label>
+                        </td>
+                      ))}
+
+                      <td className="p-4 text-center">
+                        <button
+                          type="button"
+                          onClick={() => deleteAdminNotification(index)}
+                          className="px-3 py-2 bg-red-50 text-red-700 border border-red-200 text-xs font-bold rounded-lg hover:bg-red-600 hover:text-white transition"
+                        >
+                          Hapus
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="p-5 border-t border-gray-200 bg-gray-50 flex flex-wrap gap-3 justify-between items-center">
+            <p className="text-xs text-gray-500">
+              Pastikan alamat email valid sebelum menyimpan.
+            </p>
+            <button
+              type="button"
+              onClick={handleSaveAdminNotifications}
+              disabled={isSavingAdmins}
+              className={`px-6 py-3 text-white text-sm font-bold rounded-xl transition shadow-sm ${
+                isSavingAdmins
+                  ? 'bg-gray-400 cursor-wait'
+                  : 'bg-green-600 hover:bg-green-700'
+              }`}
+            >
+              {isSavingAdmins ? 'Menyimpan...' : '💾 Simpan Assigned Email'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // =============== OVERALL RECAP VIEW ===============
+  const renderRecapMaster = () => (
+    <div className="animate-[fadeIn_0.3s_ease-out]">
+      <div className="mb-8 border-b border-gray-200 pb-4">
+        <div className="flex flex-wrap gap-4 justify-between items-center"><h2 className="text-2xl font-black text-gray-900">Overall Assessment Recap 📊</h2><select value={selectedRole} onChange={(e) => setSelectedRole(e.target.value)} className="border border-gray-300 bg-white rounded-lg p-2 text-sm font-bold outline-none">{ROLES.map(role => <option key={role} value={role}>{role}</option>)}</select></div>
+        <p className="text-sm text-gray-500 mt-1">Rangkuman metrik nilai kandidat dari tahap Kognitif hingga Wawancara.</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {activeApplicants.filter(a => a['Posisi'] === selectedRole && ['Wawancara', 'Sudah Wawancara', 'Onboarding', 'Active'].includes(a['Status'])).length === 0 ? (
+          <div className="col-span-full text-center py-10 bg-white rounded-2xl border border-dashed border-gray-300 text-gray-500 font-medium">Belum ada kandidat yang mencapai tahap evaluasi lanjutan.</div>
+        ) : (
+          activeApplicants.filter(a => a['Posisi'] === selectedRole && ['Wawancara', 'Sudah Wawancara', 'Onboarding', 'Active'].includes(a['Status'])).map((app, idx) => {
+            const appId = app['ID Pelamar'] || app.id;
+            
+            // Kalkulasi Nilai Kognitif (Ambil dari hasilJawaban)
+            const kogResult = hasilJawaban.find(h => h['ID Pelamar'] === appId || h['Nama'] === app['Nama']);
+            const kogScore = kogResult ? parseInt(kogResult['Persentase'] || kogResult['Total Score'] || 0) : 0;
+            
+            // Kalkulasi Nilai Interview
+            const intResult = interviewResults.find(r => r.idPelamar === appId);
+            const intScoreRaw = intResult ? parseInt(intResult.totalScore) : 0;
+            const maxIntScore = intResult && Number(intResult.maxScore) > 0 ? Number(intResult.maxScore) : (interviewQuestions.length > 0 ? interviewQuestions.length * 3 : 1);
+            const intPercentage = intResult ? Math.round((intScoreRaw / maxIntScore) * 100) : 0;
+
+            // Kalkulasi Rata-rata Akhir
+            const finalScore = Math.round((kogScore + intPercentage) / 2);
+
+            return (
+              <div key={idx} className="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 flex flex-col">
+                <div className="flex justify-between items-start mb-2">
+                  <div>
+                    <h3 className="font-black text-gray-900 text-lg line-clamp-1">{app['Nama'] || 'Kandidat'}</h3>
+                    <p className="text-xs text-gray-500 mt-1">{appId} • <span className="font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">{app['Posisi'] || '-'}</span></p>
+                  </div>
+                </div>
+
+                <div className="flex justify-around items-center py-6 border-y border-gray-100 my-4 bg-gray-50 rounded-xl">
+                  <CircularProgress percentage={kogScore} label="Kognitif" colorClass="text-purple-500" />
+                  <CircularProgress percentage={intPercentage} label="Wawancara" colorClass="text-blue-500" />
+                  <CircularProgress percentage={finalScore} label="Rata-rata" colorClass={finalScore >= 75 ? 'text-green-500' : finalScore >= 50 ? 'text-yellow-500' : 'text-red-500'} />
+                </div>
+
+                <div className="mt-auto pt-2">
+                  <div className="flex items-center justify-between text-xs font-bold mb-3">
+                    <span className="text-gray-500">Status Saat Ini:</span>
+                    <span className={`px-3 py-1 rounded-full ${app['Status'] === 'Active' ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-700'}`}>{app['Status']}</span>
+                  </div>
+                  <button onClick={() => setSelectedDetail({ 
+                    id: appId, 
+                    title: `Detail Assessment: ${app['Nama']}`, 
+                    content: `Rincian Nilai Kandidat:\n\n1. Nilai Kognitif: ${kogScore}%\n2. Nilai Wawancara: ${intScoreRaw}/${maxIntScore} (Setara ${intPercentage}%)\n\n🏆 RATA-RATA KESELURUHAN: ${finalScore}%` 
+                  })} className="w-full py-3 bg-black hover:bg-red-600 text-white text-xs font-bold rounded-xl transition shadow-md">
+                    Lihat Detail Analitik
+                  </button>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen flex bg-gray-100 overflow-hidden">
+      
+      <aside className={`bg-black text-white flex flex-col shadow-2xl z-20 transition-all duration-300 ease-in-out ${isSidebarOpen ? 'w-64' : 'w-0 overflow-hidden opacity-0 md:opacity-100 md:w-0'}`}>
+        <div className="p-6 border-b border-gray-800 flex items-center space-x-3 w-64">
+          <div className="w-10 h-10 bg-red-600 rounded flex items-center justify-center font-bold text-xl">A</div>
+          <div><h1 className="font-bold">ADMIN</h1><p className="text-xs text-gray-400">Portal Rekrutmen</p></div>
+        </div>
+        <nav className="flex-1 py-6 px-4 space-y-2 w-64">
+          <button onClick={() => setActiveTab('dashboard')} className={`w-full text-left px-4 py-3 rounded-xl ${activeTab === 'dashboard' ? 'bg-red-600 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>📊 Dashboard Utama</button>
+          <button onClick={() => setActiveTab('kognitif_builder')} className={`w-full text-left px-4 py-3 rounded-xl ${activeTab === 'kognitif_builder' ? 'bg-red-600 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>🧠 Penilaian Kognitif</button>
+          <button onClick={() => setActiveTab('interview')} className={`w-full text-left px-4 py-3 rounded-xl ${activeTab === 'interview' ? 'bg-red-600 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>🗣️ Penilaian Wawancara</button>
+          <button onClick={() => setActiveTab('onboarding')} className={`w-full text-left px-4 py-3 rounded-xl ${activeTab === 'onboarding' ? 'bg-red-600 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>
+            🤝 Onboarding
+          </button>
+          <button onClick={() => setActiveTab('notifications')} className={`w-full text-left px-4 py-3 rounded-xl ${activeTab === 'notifications' ? 'bg-red-600 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>
+            ✉️ Assigned Admin Email
+          </button>
+          <button onClick={() => setActiveTab('recap')} className={`w-full text-left px-4 py-3 rounded-xl ${activeTab === 'recap' ? 'bg-red-600 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>
+            📈 Overall Recap
+          </button>
+        </nav>
+        <div className="p-4 border-t border-gray-800 w-64">
+          <button onClick={handleLogout} className="w-full py-3 bg-gray-900 hover:bg-red-600 rounded-xl text-sm font-bold">Keluar Sistem</button>
+        </div>
+      </aside>
+
+      <div className="flex-1 flex flex-col h-screen overflow-hidden">
+        <header className="bg-white border-b border-gray-200 py-4 px-6 flex justify-between items-center shadow-sm z-10">
+          <div className="flex items-center">
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="mr-4 text-gray-600 hover:text-red-600 focus:outline-none transition transform hover:scale-110">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+            </button>
+            <h1 className="text-xl font-bold tracking-wide text-gray-800">HR PORTAL</h1>
+          </div>
+          <div className="flex items-center space-x-3">
+            <span className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-sm font-bold text-gray-600">HR</span>
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 w-full max-w-7xl mx-auto">
+          {activeTab === 'dashboard' ? renderDashboard() :
+           activeTab === 'kognitif_builder' ? renderKognitifMaster() :
+           activeTab === 'interview' ? renderInterviewMaster() :
+           activeTab === 'onboarding' ? renderOnboardingMaster() :
+           activeTab === 'notifications' ? renderAdminNotifications() :
+           renderRecapMaster()}
+        </div>
+      </div>
+
+      {selectedDetail && (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg relative p-6">
+            <button onClick={() => setSelectedDetail(null)} className="absolute top-4 right-4 text-gray-400 hover:text-red-600 font-bold text-xl transition">×</button>
+            <h3 className="text-xl font-bold mb-1">{selectedDetail.title}</h3>
+            <p className="text-sm text-gray-500 mb-4 border-b pb-2">ID: {selectedDetail.id}</p>
+            <div className="bg-gray-50 p-4 rounded-lg border text-sm leading-relaxed whitespace-pre-wrap">{selectedDetail.content}</div>
+          </div>
+        </div>
+      )}
+
+      {/* TARUH MODAL WAWANCARA DI SINI WAK 👇 */}
+      {interviewModal.isOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-[fadeIn_0.2s_ease-out]">
+            <div className="flex justify-between items-center mb-6 border-b pb-4">
+              <div>
+                <h3 className="text-xl font-bold text-gray-900">Atur Jadwal Wawancara</h3>
+                <p className="text-sm text-gray-500">Kandidat: <span className="font-bold text-black">{interviewModal.app['Nama'] || 'Kandidat'}</span></p>
+              </div>
+              <button onClick={() => setInterviewModal({...interviewModal, isOpen: false})} className="text-gray-400 hover:text-red-600 font-bold text-2xl">×</button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase text-gray-500 mb-2">Format Wawancara</label>
+                <div className="flex space-x-4">
+                  <label className={`flex-1 py-3 px-4 border rounded-xl cursor-pointer font-bold text-sm flex items-center justify-center gap-2 transition ${interviewModal.type === 'online' ? 'bg-blue-50 border-blue-500 text-blue-700' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'}`}>
+                    <input type="radio" name="intType" checked={interviewModal.type === 'online'} onChange={() => setInterviewModal({...interviewModal, type: 'online'})} className="hidden" />
+                    🌐 Online
+                  </label>
+                  <label className={`flex-1 py-3 px-4 border rounded-xl cursor-pointer font-bold text-sm flex items-center justify-center gap-2 transition ${interviewModal.type === 'offline' ? 'bg-green-50 border-green-500 text-green-700' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'}`}>
+                    <input type="radio" name="intType" checked={interviewModal.type === 'offline'} onChange={() => setInterviewModal({...interviewModal, type: 'offline'})} className="hidden" />
+                    🏢 Offline
+                  </label>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase text-gray-500 mb-1">Tanggal & Waktu</label>
+                <input type="datetime-local" value={interviewModal.datetime} onChange={(e) => setInterviewModal({...interviewModal, datetime: e.target.value})} className="w-full border border-gray-300 rounded-lg p-2.5 text-sm outline-none focus:border-red-500" required />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase text-gray-500 mb-1">
+                  {interviewModal.type === 'online' ? 'Link Google Meet / Zoom' : 'Alamat Lengkap Kantor'}
+                </label>
+                <textarea 
+                  value={interviewModal.location} 
+                  onChange={(e) => setInterviewModal({...interviewModal, location: e.target.value})} 
+                  className="w-full border border-gray-300 rounded-lg p-2.5 text-sm outline-none focus:border-red-500 resize-none" 
+                  rows="3" 
+                  placeholder={interviewModal.type === 'online' ? 'https://meet.google.com/xxx-xxxx-xxx' : 'Jl. Sudirman No. 123, Gedung Indah Lantai 4...'} 
+                  required 
+                ></textarea>
+              </div>
+            </div>
+
+            <div className="mt-8 flex gap-3">
+              <button onClick={() => setInterviewModal({...interviewModal, isOpen: false})} className="flex-1 py-3 bg-gray-100 text-gray-800 font-bold rounded-xl hover:bg-gray-200 transition">Batal</button>
+              <button onClick={handleSendInterview} className="flex-1 py-3 bg-black text-white font-bold rounded-xl hover:bg-red-600 transition shadow-md">
+                Simpan & Kirim WA
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 👆 BATAS MODAL WAWANCARA */}
+
+      {/* MODAL LIVE GRADING WAWANCARA */}
+      {gradingModal.isOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh] animate-[fadeIn_0.2s_ease-out]">
+            <div className="p-6 border-b flex justify-between items-center bg-blue-50 rounded-t-2xl">
+              <div>
+                <h3 className="text-xl font-bold text-blue-900">Form Penilaian Wawancara</h3>
+                <p className="text-sm text-blue-700">Kandidat: <span className="font-bold">{gradingModal.app['Nama'] || 'Kandidat'}</span></p>
+              </div>
+              <button onClick={() => setGradingModal({ isOpen: false, app: null, answers: {} })} className="text-blue-400 hover:text-blue-800 font-bold text-2xl">×</button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 space-y-6">
+              {interviewQuestions.map((q, idx) => (
+                <div key={q.id} className="border-b pb-4 last:border-0">
+                  <p className="font-bold text-gray-800 mb-3 text-sm">{idx + 1}. {q.question}</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => handleScoreChange(q.id, 1)} className={`flex-1 py-2 rounded-lg text-xs font-bold border transition ${gradingModal.answers[q.id] === 1 ? 'bg-red-500 text-white border-red-500 shadow-inner' : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-300'}`}>1 - Tidak Relevan</button>
+                    <button onClick={() => handleScoreChange(q.id, 2)} className={`flex-1 py-2 rounded-lg text-xs font-bold border transition ${gradingModal.answers[q.id] === 2 ? 'bg-yellow-500 text-white border-yellow-500 shadow-inner' : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-300'}`}>2 - Relevan</button>
+                    <button onClick={() => handleScoreChange(q.id, 3)} className={`flex-1 py-2 rounded-lg text-xs font-bold border transition ${gradingModal.answers[q.id] === 3 ? 'bg-green-500 text-white border-green-500 shadow-inner' : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-300'}`}>3 - Sangat Relevan</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="p-6 border-t bg-gray-50 rounded-b-2xl flex gap-4">
+              <div className="flex-1 flex items-center justify-between px-4 bg-white rounded-xl border border-gray-200">
+                <span className="text-xs font-bold text-gray-500 uppercase">Total Skor Sementara</span>
+                <span className="text-xl font-black text-blue-600">{Object.values(gradingModal.answers).reduce((a, b) => a + b, 0)}</span>
+              </div>
+              <button onClick={handleSubmitGrading} disabled={isSubmittingGrade} className={`px-8 py-3 text-white font-bold rounded-xl transition shadow-md ${isSubmittingGrade ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                {isSubmittingGrade ? 'Menyimpan...' : 'Simpan Nilai'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* KOMPONEN MODAL POP-UP CUSTOM ANTI BURIQ */}
+      {dialog.isOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center animate-[fadeIn_0.2s_ease-out]">
+            <div className={`w-16 h-16 rounded-full mx-auto mb-4 flex items-center justify-center text-3xl ${dialog.type === 'confirm' ? 'bg-yellow-100 text-yellow-600' : dialog.type === 'success' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
+              {dialog.type === 'confirm' ? '❓' : dialog.type === 'success' ? '✅' : '⚠️'}
+            </div>
+            <h3 className="text-xl font-bold mb-2 text-gray-900">{dialog.title}</h3>
+            <p className="text-gray-600 mb-6 text-sm">{dialog.message}</p>
+            <div className="flex justify-center gap-3">
+              {dialog.type === 'confirm' && (
+                <button onClick={() => setDialog({ ...dialog, isOpen: false })} className="px-5 py-2 bg-gray-100 text-gray-800 font-bold rounded-xl hover:bg-gray-200 transition">Batal</button>
+              )}
+              <button onClick={() => { setDialog({ ...dialog, isOpen: false }); if(dialog.onConfirm) dialog.onConfirm(); }} className="px-5 py-2 bg-black text-white font-bold rounded-xl hover:bg-gray-800 transition shadow-md">
+                {dialog.type === 'confirm' ? 'Ya, Lanjutkan' : 'Tutup'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<AdminDashboard />);
+
+  </script>
+</body>
+</html>

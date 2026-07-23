@@ -1,0 +1,1391 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Portal Kandidat</title>
+
+  <script>
+    const GAS_API_URL = ''; // Automatically received from index.html and stored in this browser.
+
+    (function setupAppsScriptBridge() {
+      'use strict';
+
+      const STORAGE_KEY = 'kip_gas_api_url';
+      const CHANNEL = 'KIP_GAS_RPC';
+      const pendingRequests = new Map();
+      let requestCounter = 0;
+      let bridgeReady = false;
+      let bridgeIframe = null;
+      let bridgeReadyResolver = null;
+
+      function isValidApiUrl(value) {
+        return /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:[?#].*)?$/.test(
+          String(value || '').trim()
+        );
+      }
+
+      function saveApiUrl(value) {
+        if (!isValidApiUrl(value)) return;
+        try { localStorage.setItem(STORAGE_KEY, String(value).trim()); } catch (ignored) {}
+      }
+
+      function readStoredApiUrl() {
+        try { return localStorage.getItem(STORAGE_KEY) || ''; } catch (ignored) { return ''; }
+      }
+
+      function resolveApiUrl() {
+        const queryValue = new URLSearchParams(window.location.search).get('api') || '';
+
+        if (isValidApiUrl(queryValue)) {
+          saveApiUrl(queryValue);
+          return queryValue.trim();
+        }
+
+        if (isValidApiUrl(GAS_API_URL)) {
+          saveApiUrl(GAS_API_URL);
+          return GAS_API_URL.trim();
+        }
+
+        const storedValue = readStoredApiUrl();
+        return isValidApiUrl(storedValue) ? storedValue.trim() : '';
+      }
+
+      function clientBaseUrl() {
+        return new URL('.', window.location.href).href;
+      }
+
+      const apiUrl = resolveApiUrl();
+      window.KIP_API_URL = apiUrl;
+
+      window.buildGitHubPageUrl = function buildGitHubPageUrl(fileName) {
+        const url = new URL(fileName, window.location.href);
+        if (apiUrl) url.searchParams.set('api', apiUrl);
+        return url.href;
+      };
+
+      function initializeIframeBridge() {
+        if (!apiUrl || bridgeIframe) return;
+
+        bridgeIframe = document.createElement('iframe');
+        bridgeIframe.title = 'KIP Apps Script Bridge';
+        bridgeIframe.setAttribute('aria-hidden', 'true');
+        bridgeIframe.style.position = 'fixed';
+        bridgeIframe.style.width = '1px';
+        bridgeIframe.style.height = '1px';
+        bridgeIframe.style.opacity = '0';
+        bridgeIframe.style.pointerEvents = 'none';
+        bridgeIframe.style.border = '0';
+        bridgeIframe.style.left = '-9999px';
+        bridgeIframe.src = apiUrl;
+
+        (document.body || document.documentElement).appendChild(bridgeIframe);
+      }
+
+      window.addEventListener('message', function (event) {
+        if (!bridgeIframe || event.source !== bridgeIframe.contentWindow) return;
+
+        const payload = event.data || {};
+        if (payload.channel !== CHANNEL) return;
+
+        if (payload.type === 'ready') {
+          bridgeReady = true;
+          if (bridgeReadyResolver) {
+            bridgeReadyResolver(true);
+            bridgeReadyResolver = null;
+          }
+          return;
+        }
+
+        if (payload.type !== 'response' || !pendingRequests.has(payload.id)) return;
+
+        const pending = pendingRequests.get(payload.id);
+        pendingRequests.delete(payload.id);
+        clearTimeout(pending.timeoutId);
+
+        if (payload.ok === true) {
+          pending.resolve(payload.result);
+        } else {
+          pending.reject(new Error(payload.error || 'Apps Script request failed.'));
+        }
+      });
+
+      function waitForIframeBridge() {
+        initializeIframeBridge();
+
+        if (bridgeReady) return Promise.resolve(true);
+        if (!bridgeIframe) return Promise.resolve(false);
+
+        return new Promise(function (resolve) {
+          let settled = false;
+
+          bridgeReadyResolver = function (value) {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+          };
+
+          setTimeout(function () {
+            if (settled) return;
+            settled = true;
+            bridgeReadyResolver = null;
+            resolve(false);
+          }, 8000);
+        });
+      }
+
+      function invokeThroughIframe(action, args) {
+        return new Promise(function (resolve, reject) {
+          const id = 'rpc-' + Date.now() + '-' + (++requestCounter);
+          const timeoutId = setTimeout(function () {
+            pendingRequests.delete(id);
+            reject(new Error('Apps Script bridge tidak merespons.'));
+          }, 60000);
+
+          pendingRequests.set(id, { resolve, reject, timeoutId });
+          bridgeIframe.contentWindow.postMessage({
+            channel: CHANNEL,
+            type: 'request',
+            id,
+            action,
+            args,
+            clientBaseUrl: clientBaseUrl()
+          }, '*');
+        });
+      }
+
+      async function invokeThroughFetch(action, args) {
+        const formBody = new URLSearchParams();
+        formBody.set('payload', JSON.stringify({
+          action,
+          args,
+          clientBaseUrl: clientBaseUrl()
+        }));
+
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          body: formBody,
+          redirect: 'follow'
+        });
+
+        const responseText = await response.text();
+        let payload;
+
+        try {
+          payload = JSON.parse(responseText);
+        } catch (error) {
+          throw new Error(
+            'Respons GAS bukan JSON. Pastikan deployment dijalankan sebagai pemilik dan aksesnya diatur ke Anyone.'
+          );
+        }
+
+        if (!payload || payload.ok !== true) {
+          throw new Error(payload && payload.error ? payload.error : 'Respons API tidak valid.');
+        }
+
+        return payload.result;
+      }
+
+      async function invokeApi(action, args) {
+        if (!apiUrl) {
+          throw new Error('GAS API URL belum tersedia. Buka index.html terlebih dahulu dari repository GitHub Pages yang sama.');
+        }
+
+        const ready = await waitForIframeBridge();
+
+        if (ready) {
+          try {
+            return await invokeThroughIframe(action, args);
+          } catch (iframeError) {
+            console.warn('Iframe bridge failed, using fetch fallback.', iframeError);
+          }
+        }
+
+        return invokeThroughFetch(action, args);
+      }
+
+      function createRunner(successHandler, failureHandler) {
+        return new Proxy({}, {
+          get: function (_target, property) {
+            if (property === 'withSuccessHandler') {
+              return function (handler) {
+                return createRunner(handler, failureHandler);
+              };
+            }
+
+            if (property === 'withFailureHandler') {
+              return function (handler) {
+                return createRunner(successHandler, handler);
+              };
+            }
+
+            return function () {
+              const args = Array.prototype.slice.call(arguments);
+
+              invokeApi(String(property), args)
+                .then(function (result) {
+                  if (typeof successHandler === 'function') successHandler(result);
+                })
+                .catch(function (error) {
+                  if (typeof failureHandler === 'function') {
+                    failureHandler(error);
+                  } else if (typeof successHandler === 'function') {
+                    successHandler({ success: false, message: error.message });
+                  } else {
+                    console.error(error);
+                  }
+                });
+            };
+          }
+        });
+      }
+
+      window.google = window.google || {};
+      window.google.script = window.google.script || {};
+      window.google.script.run = createRunner(null, null);
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initializeIframeBridge, { once: true });
+      } else {
+        initializeIframeBridge();
+      }
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #f5f6f8;
+      --surface: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --red: #dc2626;
+      --red-soft: #fef2f2;
+      --green: #059669;
+      --green-soft: #ecfdf5;
+      --blue: #2563eb;
+      --blue-soft: #eff6ff;
+      --amber: #d97706;
+      --amber-soft: #fffbeb;
+      --purple: #7c3aed;
+      --purple-soft: #f5f3ff;
+      --shadow: 0 18px 50px rgba(17, 24, 39, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(220, 38, 38, 0.08), transparent 28%),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    button, input { font: inherit; }
+
+    button { border: 0; }
+
+    .shell {
+      width: min(960px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 36px 0 56px;
+    }
+
+    .header {
+      padding: 28px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    .brand-mark {
+      width: 54px;
+      height: 54px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 12px;
+      border-radius: 17px;
+      background: #111827;
+      color: #fff;
+      font-weight: 900;
+      font-size: 22px;
+    }
+
+    .header h1 {
+      margin: 0;
+      font-size: clamp(26px, 5vw, 38px);
+      line-height: 1.15;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+
+    .header-meta {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .candidate-name {
+      margin-top: 14px;
+      font-weight: 800;
+      font-size: 17px;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 12px;
+      padding: 8px 13px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f9fafb;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .status-badge::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: currentColor;
+    }
+
+    .status-Baru { color: var(--blue); background: var(--blue-soft); border-color: #bfdbfe; }
+    .status-Penilaian-Cognitive { color: var(--purple); background: var(--purple-soft); border-color: #ddd6fe; }
+    .status-Selesai-Test-Kognitif { color: #4338ca; background: #eef2ff; border-color: #c7d2fe; }
+    .status-Wawancara, .status-Sudah-Wawancara { color: var(--amber); background: var(--amber-soft); border-color: #fde68a; }
+    .status-Onboarding { color: #c2410c; background: #fff7ed; border-color: #fed7aa; }
+    .status-Active { color: var(--green); background: var(--green-soft); border-color: #a7f3d0; }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel-title {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 900;
+      letter-spacing: -0.025em;
+    }
+
+    .panel-subtitle {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 26px;
+    }
+
+    .action-card {
+      min-height: 190px;
+      padding: 24px;
+      border: 2px solid var(--line);
+      border-radius: 20px;
+      background: #fff;
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+      transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+
+    .action-card:not(:disabled):hover {
+      transform: translateY(-3px);
+      box-shadow: 0 15px 32px rgba(17, 24, 39, 0.1);
+    }
+
+    .action-card:disabled {
+      cursor: not-allowed;
+      opacity: .58;
+      background: #f9fafb;
+    }
+
+    .action-card.available-test {
+      border-color: #fca5a5;
+      background: var(--red-soft);
+    }
+
+    .action-card.available-contract {
+      border-color: #6ee7b7;
+      background: var(--green-soft);
+    }
+
+    .card-icon {
+      font-size: 38px;
+      line-height: 1;
+      margin-bottom: 18px;
+    }
+
+    .card-title {
+      display: block;
+      font-weight: 900;
+      font-size: 17px;
+      line-height: 1.4;
+    }
+
+    .card-status {
+      display: block;
+      margin-top: 9px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .btn {
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 44px;
+      padding: 11px 18px;
+      border-radius: 12px;
+      background: #111827;
+      color: #fff;
+      font-weight: 800;
+      cursor: pointer;
+      text-decoration: none;
+      transition: transform .15s ease, opacity .15s ease, background .15s ease;
+    }
+
+    .btn:hover:not(:disabled) { transform: translateY(-1px); }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+    .btn-red { background: var(--red); }
+    .btn-green { background: var(--green); }
+    .btn-light { background: #f3f4f6; color: #374151; }
+    .btn-full { width: 100%; min-height: 52px; }
+
+    .loader-wrap, .error-wrap, .empty-wrap {
+      min-height: 420px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+    }
+
+    .message-card {
+      width: min(620px, 100%);
+      padding: 28px;
+      border-radius: 22px;
+      background: #fff;
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      text-align: center;
+    }
+
+    .message-icon {
+      font-size: 44px;
+      margin-bottom: 14px;
+    }
+
+    .message-card h2 {
+      margin: 0;
+      font-size: 23px;
+      font-weight: 900;
+    }
+
+    .message-card p {
+      margin: 12px 0 0;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .spinner {
+      width: 42px;
+      height: 42px;
+      margin: 0 auto 18px;
+      border: 4px solid #e5e7eb;
+      border-top-color: var(--red);
+      border-radius: 50%;
+      animation: spin .75s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .timer-bar {
+      position: sticky;
+      top: 12px;
+      z-index: 20;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      padding: 16px 18px;
+      margin-bottom: 20px;
+      background: rgba(255, 255, 255, .95);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 12px 30px rgba(17, 24, 39, .1);
+      font-weight: 900;
+    }
+
+    .timer-value {
+      font-variant-numeric: tabular-nums;
+      font-size: 22px;
+    }
+
+    .timer-danger { color: var(--red); animation: pulse 1s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .45; } }
+
+    .question-list { display: grid; gap: 16px; }
+
+    .question-card {
+      padding: 22px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 8px 20px rgba(17, 24, 39, .04);
+    }
+
+    .question-title {
+      margin: 0;
+      font-size: 16px;
+      line-height: 1.6;
+      font-weight: 900;
+    }
+
+    .option-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .option {
+      display: flex;
+      align-items: flex-start;
+      gap: 11px;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      cursor: pointer;
+      transition: background .15s ease, border-color .15s ease;
+    }
+
+    .option:hover { border-color: #9ca3af; background: #f9fafb; }
+    .option.selected { border-color: #111827; background: #f3f4f6; }
+    .option input { margin-top: 3px; accent-color: #111827; }
+
+    .contract-head {
+      text-align: center;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .contract-scroll {
+      max-height: 470px;
+      overflow: auto;
+      margin-top: 20px;
+      padding: 22px;
+      border-radius: 16px;
+      background: #f9fafb;
+      border: 1px solid var(--line);
+    }
+
+    .clause + .clause {
+      margin-top: 24px;
+      padding-top: 22px;
+      border-top: 1px solid var(--line);
+    }
+
+    .clause h3 { margin: 0; font-size: 16px; }
+    .clause p { margin: 8px 0 0; white-space: pre-wrap; line-height: 1.7; color: #374151; font-size: 14px; }
+
+    .sign-box {
+      margin-top: 20px;
+      padding: 20px;
+      background: var(--blue-soft);
+      border: 1px solid #bfdbfe;
+      border-radius: 16px;
+    }
+
+    .check-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 11px;
+      font-weight: 700;
+      line-height: 1.55;
+      cursor: pointer;
+    }
+
+    .check-row input { margin-top: 4px; accent-color: var(--green); }
+
+    .text-input {
+      width: 100%;
+      min-height: 50px;
+      margin-top: 16px;
+      padding: 13px 15px;
+      border: 2px solid #d1d5db;
+      border-radius: 13px;
+      outline: none;
+      background: #fff;
+      font-weight: 800;
+    }
+
+    .text-input:focus { border-color: var(--blue); }
+
+    .success-panel {
+      padding: 44px 28px;
+      text-align: center;
+    }
+
+    .success-panel .big-icon { font-size: 64px; }
+    .success-panel h2 { margin: 14px 0 0; color: var(--green); font-size: 30px; }
+    .success-panel p { color: var(--muted); line-height: 1.65; }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: rgba(17, 24, 39, .68);
+    }
+
+    .modal {
+      width: min(430px, 100%);
+      padding: 26px;
+      border-radius: 22px;
+      background: #fff;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, .25);
+      text-align: center;
+    }
+
+    .modal-icon { font-size: 42px; }
+    .modal h3 { margin: 12px 0 0; font-size: 22px; }
+    .modal p { margin: 12px 0 0; color: var(--muted); line-height: 1.6; }
+    .modal-actions { display: flex; gap: 10px; margin-top: 22px; }
+    .modal-actions .btn { flex: 1; }
+
+    .fatal {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .fatal pre {
+      margin: 16px 0 0;
+      padding: 14px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border-radius: 12px;
+      background: #f9fafb;
+      text-align: left;
+      color: #991b1b;
+      font-size: 13px;
+    }
+
+    @media (max-width: 700px) {
+      .shell { width: min(100% - 20px, 960px); padding-top: 16px; }
+      .header, .panel { padding: 20px; border-radius: 18px; }
+      .grid { grid-template-columns: 1fr; }
+      .toolbar .btn { width: 100%; }
+      .modal-actions { flex-direction: column-reverse; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="loader-wrap">
+      <div class="message-card">
+        <div class="spinner"></div>
+        <h2>Memuat Portal Kandidat</h2>
+        <p>Sistem sedang mengambil status dan data tahapan seleksi Anda.</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-root"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var state = {
+        applicantId: '',
+        profile: null,
+        questions: [],
+        clauses: [],
+        answers: {},
+        view: 'dashboard',
+        loading: true,
+        submitting: false,
+        timerInterval: null,
+        remainingSeconds: 1800,
+        pdfUrl: '',
+        modalConfirm: null
+      };
+
+      var app = document.getElementById('app');
+      var modalRoot = document.getElementById('modal-root');
+
+      window.addEventListener('error', function (event) {
+        showFatalError(event.message || 'Terjadi kesalahan JavaScript yang tidak diketahui.');
+      });
+
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event.reason && event.reason.message ? event.reason.message : String(event.reason || 'Promise rejection');
+        showFatalError(reason);
+      });
+
+      function escapeHtml(value) {
+        return String(value === null || value === undefined ? '' : value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      }
+
+      function errorMessage(error) {
+        if (!error) return 'Terjadi kesalahan yang tidak diketahui.';
+        return error.message || error.toString();
+      }
+
+      function showFatalError(message) {
+        app.innerHTML =
+          '<div class="fatal">' +
+            '<div class="message-card" style="border-color:#fecaca">' +
+              '<div class="message-icon">⚠️</div>' +
+              '<h2 style="color:#b91c1c">Portal Kandidat gagal dimuat</h2>' +
+              '<p>Terjadi kesalahan JavaScript. Detail:</p>' +
+              '<pre>' + escapeHtml(message) + '</pre>' +
+              '<div class="toolbar" style="justify-content:center">' +
+                '<button class="btn" id="fatal-reload">Muat Ulang</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+
+        var reloadButton = document.getElementById('fatal-reload');
+        if (reloadButton) reloadButton.onclick = function () { window.location.reload(); };
+      }
+
+      function statusClass(status) {
+        return 'status-' + String(status || 'Baru').replace(/\s+/g, '-');
+      }
+
+      function safeLocalStorageGet(key) {
+        try { return localStorage.getItem(key); } catch (ignored) { return null; }
+      }
+
+      function safeLocalStorageSet(key, value) {
+        try { localStorage.setItem(key, value); } catch (ignored) {}
+      }
+
+      function safeLocalStorageRemove(key) {
+        try { localStorage.removeItem(key); } catch (ignored) {}
+      }
+
+      function timerKey() { return 'kip_test_end_' + state.applicantId; }
+      function answersKey() { return 'kip_test_answers_' + state.applicantId; }
+
+      function openModal(type, title, message, onConfirm) {
+        state.modalConfirm = typeof onConfirm === 'function' ? onConfirm : null;
+
+        var icon = type === 'confirm' ? '❓' : type === 'success' ? '✅' : '⚠️';
+        var confirmText = type === 'confirm' ? 'Ya, Lanjutkan' : 'Tutup';
+
+        modalRoot.innerHTML =
+          '<div class="modal-backdrop">' +
+            '<div class="modal" role="dialog" aria-modal="true">' +
+              '<div class="modal-icon">' + icon + '</div>' +
+              '<h3>' + escapeHtml(title) + '</h3>' +
+              '<p>' + escapeHtml(message) + '</p>' +
+              '<div class="modal-actions">' +
+                (type === 'confirm'
+                  ? '<button class="btn btn-light" id="modal-cancel">Batal</button>'
+                  : '') +
+                '<button class="btn" id="modal-confirm">' + confirmText + '</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+
+        var cancelButton = document.getElementById('modal-cancel');
+        var confirmButton = document.getElementById('modal-confirm');
+
+        if (cancelButton) {
+          cancelButton.onclick = closeModal;
+        }
+
+        confirmButton.onclick = function () {
+          var callback = state.modalConfirm;
+          closeModal();
+          if (callback) callback();
+        };
+      }
+
+      function closeModal() {
+        state.modalConfirm = null;
+        modalRoot.innerHTML = '';
+      }
+
+      function renderLoading(message) {
+        app.innerHTML =
+          '<div class="loader-wrap">' +
+            '<div class="message-card">' +
+              '<div class="spinner"></div>' +
+              '<h2>Mohon Tunggu</h2>' +
+              '<p>' + escapeHtml(message || 'Memuat data kandidat...') + '</p>' +
+            '</div>' +
+          '</div>';
+      }
+
+      function renderSessionMissing(message) {
+        app.innerHTML =
+          '<div class="error-wrap">' +
+            '<div class="message-card">' +
+              '<div class="message-icon">🔐</div>' +
+              '<h2>Sesi kandidat tidak ditemukan</h2>' +
+              '<p>' + escapeHtml(message || 'Silakan kembali ke halaman utama dan login menggunakan ID Pelamar Anda.') + '</p>' +
+              '<div class="toolbar" style="justify-content:center">' +
+                '<button class="btn btn-red" id="go-home-missing">Kembali ke Halaman Login</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+
+        document.getElementById('go-home-missing').onclick = goHome;
+      }
+
+      function pageHeaderHtml() {
+        var p = state.profile || {};
+        return (
+          '<header class="header">' +
+            '<div class="brand-mark">KIP</div>' +
+            '<h1>Portal Kandidat</h1>' +
+            '<div class="header-meta">ID Pelamar: <strong style="color:#dc2626">' + escapeHtml(state.applicantId) + '</strong></div>' +
+            '<div class="candidate-name">' + escapeHtml(p.name || '-') + ' <span style="color:#9ca3af">•</span> ' + escapeHtml(p.position || '-') + '</div>' +
+            '<div class="status-badge ' + statusClass(p.status) + '">Status: ' + escapeHtml(p.status || '-') + '</div>' +
+          '</header>'
+        );
+      }
+
+      function renderDashboard() {
+        var p = state.profile;
+        if (!p) {
+          renderSessionMissing('Data profil kandidat tidak tersedia.');
+          return;
+        }
+
+        var testAvailable = p.status === 'Penilaian Cognitive' && !p.hasSubmittedTest;
+        var contractAvailable = p.status === 'Onboarding' && !p.hasSigned;
+
+        var testStatus = p.hasSubmittedTest
+          ? 'Sudah dikumpulkan'
+          : testAvailable
+            ? (state.questions.length ? 'Tersedia — klik untuk mulai' : 'Template soal belum tersedia')
+            : 'Belum tersedia pada status saat ini';
+
+        var contractStatus = p.hasSigned
+          ? 'Sudah ditandatangani'
+          : contractAvailable
+            ? (state.clauses.length ? 'Tersedia — klik untuk membaca' : 'Template perjanjian belum tersedia')
+            : 'Belum tersedia pada status saat ini';
+
+        app.innerHTML =
+          '<div class="shell">' +
+            pageHeaderHtml() +
+            '<main class="panel">' +
+              '<h2 class="panel-title">Dashboard Anda</h2>' +
+              '<p class="panel-subtitle">Tahapan yang tersedia akan aktif secara otomatis berdasarkan status yang diberikan oleh HR.</p>' +
+              '<div class="grid">' +
+                '<button class="action-card ' + (testAvailable && state.questions.length ? 'available-test' : '') + '" id="start-test" ' +
+                  (!testAvailable || !state.questions.length ? 'disabled' : '') + '>' +
+                  '<div class="card-icon">🧠</div>' +
+                  '<span class="card-title">Ujian Kognitif — ' + escapeHtml(p.position) + '</span>' +
+                  '<span class="card-status">' + escapeHtml(testStatus) + '</span>' +
+                '</button>' +
+                '<button class="action-card ' + (contractAvailable && state.clauses.length ? 'available-contract' : '') + '" id="open-contract" ' +
+                  (!contractAvailable || !state.clauses.length ? 'disabled' : '') + '>' +
+                  '<div class="card-icon">🤝</div>' +
+                  '<span class="card-title">Perjanjian Onboarding — ' + escapeHtml(p.position) + '</span>' +
+                  '<span class="card-status">' + escapeHtml(contractStatus) + '</span>' +
+                '</button>' +
+              '</div>' +
+              '<div class="toolbar">' +
+                '<button class="btn btn-light" id="refresh-dashboard">↻ Refresh Status</button>' +
+                '<button class="btn btn-light" id="logout-dashboard">Keluar</button>' +
+              '</div>' +
+            '</main>' +
+          '</div>';
+
+        var startButton = document.getElementById('start-test');
+        var contractButton = document.getElementById('open-contract');
+
+        if (startButton && !startButton.disabled) startButton.onclick = confirmStartTest;
+        if (contractButton && !contractButton.disabled) contractButton.onclick = function () {
+          state.view = 'contract';
+          render();
+        };
+
+        document.getElementById('refresh-dashboard').onclick = loadPortalData;
+        document.getElementById('logout-dashboard').onclick = function () {
+          openModal(
+            'confirm',
+            'Keluar dari Portal?',
+            'Anda harus login kembali menggunakan ID Pelamar untuk membuka portal ini.',
+            goHome
+          );
+        };
+      }
+
+      function confirmStartTest() {
+        openModal(
+          'confirm',
+          'Mulai Tes Kognitif?',
+          'Waktu 30 menit akan langsung berjalan. Timer tetap berjalan meskipun halaman dimuat ulang.',
+          startTest
+        );
+      }
+
+      function startTest() {
+        if (!state.questions.length) {
+          openModal('alert', 'Soal Belum Tersedia', 'Template soal untuk posisi Anda belum dibuat oleh HR.');
+          return;
+        }
+
+        var savedAnswers = safeLocalStorageGet(answersKey());
+        if (savedAnswers) {
+          try { state.answers = JSON.parse(savedAnswers) || {}; } catch (ignored) { state.answers = {}; }
+        }
+
+        var existingEnd = Number(safeLocalStorageGet(timerKey()) || 0);
+        if (!existingEnd || existingEnd <= Date.now()) {
+          existingEnd = Date.now() + (1800 * 1000);
+          safeLocalStorageSet(timerKey(), String(existingEnd));
+        }
+
+        state.view = 'test';
+        render();
+        startTimer();
+      }
+
+      function startTimer() {
+        stopTimer();
+
+        function tick() {
+          var endTime = Number(safeLocalStorageGet(timerKey()) || 0);
+          var remaining = endTime ? Math.max(0, Math.ceil((endTime - Date.now()) / 1000)) : 0;
+          state.remainingSeconds = remaining;
+          updateTimerDisplay();
+
+          if (remaining <= 0) {
+            stopTimer();
+            submitTest(true);
+          }
+        }
+
+        tick();
+        state.timerInterval = setInterval(tick, 1000);
+      }
+
+      function stopTimer() {
+        if (state.timerInterval) {
+          clearInterval(state.timerInterval);
+          state.timerInterval = null;
+        }
+      }
+
+      function formatTime(totalSeconds) {
+        var minutes = Math.floor(totalSeconds / 60);
+        var seconds = totalSeconds % 60;
+        return (minutes < 10 ? '0' : '') + minutes + ':' + (seconds < 10 ? '0' : '') + seconds;
+      }
+
+      function updateTimerDisplay() {
+        var timerValue = document.getElementById('timer-value');
+        if (!timerValue) return;
+        timerValue.textContent = formatTime(state.remainingSeconds);
+        timerValue.className = 'timer-value' + (state.remainingSeconds < 300 ? ' timer-danger' : '');
+      }
+
+      function renderTest() {
+        var questionsHtml = '';
+
+        state.questions.forEach(function (question, questionIndex) {
+          var optionsHtml = '';
+
+          ['A', 'B', 'C', 'D'].forEach(function (letter) {
+            var optionValue = question['option' + letter];
+            if (!optionValue) return;
+
+            var checked = String(state.answers[question.id] || '') === String(optionValue);
+            optionsHtml +=
+              '<label class="option ' + (checked ? 'selected' : '') + '">' +
+                '<input type="radio" name="question-' + escapeHtml(question.id) + '" ' +
+                  'data-question-index="' + questionIndex + '" data-option="' + letter + '" ' +
+                  (checked ? 'checked' : '') + '>' +
+                '<span><strong>' + letter + '.</strong> ' + escapeHtml(optionValue) + '</span>' +
+              '</label>';
+          });
+
+          questionsHtml +=
+            '<section class="question-card">' +
+              '<h3 class="question-title">' + (questionIndex + 1) + '. ' + escapeHtml(question.question) + '</h3>' +
+              '<div class="option-list">' + optionsHtml + '</div>' +
+            '</section>';
+        });
+
+        app.innerHTML =
+          '<div class="shell">' +
+            '<div class="timer-bar">' +
+              '<span>⏱️ Sisa Waktu</span>' +
+              '<span class="timer-value" id="timer-value">' + formatTime(state.remainingSeconds) + '</span>' +
+            '</div>' +
+            '<div class="question-list">' + questionsHtml + '</div>' +
+            '<div class="panel" style="margin-top:18px">' +
+              '<button class="btn btn-full" id="submit-test" ' + (state.submitting ? 'disabled' : '') + '>' +
+                (state.submitting ? 'Menyimpan Jawaban...' : 'KUMPULKAN JAWABAN') +
+              '</button>' +
+              '<p class="panel-subtitle" style="text-align:center">Pastikan seluruh jawaban telah dipilih sebelum dikumpulkan.</p>' +
+            '</div>' +
+          '</div>';
+
+        updateTimerDisplay();
+
+        var radios = document.querySelectorAll('input[data-question-index]');
+        Array.prototype.forEach.call(radios, function (radio) {
+          radio.onchange = function () {
+            var question = state.questions[Number(this.getAttribute('data-question-index'))];
+            var letter = this.getAttribute('data-option');
+            state.answers[question.id] = question['option' + letter];
+            safeLocalStorageSet(answersKey(), JSON.stringify(state.answers));
+            renderTest();
+          };
+        });
+
+        document.getElementById('submit-test').onclick = function () {
+          if (state.submitting) return;
+
+          var unanswered = state.questions.filter(function (question) {
+            return !state.answers[question.id];
+          }).length;
+
+          if (unanswered > 0) {
+            openModal(
+              'alert',
+              'Jawaban Belum Lengkap',
+              'Masih ada ' + unanswered + ' pertanyaan yang belum dijawab.'
+            );
+            return;
+          }
+
+          openModal(
+            'confirm',
+            'Kumpulkan Jawaban?',
+            'Setelah dikumpulkan, tes tidak dapat dikerjakan ulang.',
+            function () { submitTest(false); }
+          );
+        };
+      }
+
+      function submitTest(isAutomatic) {
+        if (state.submitting) return;
+        state.submitting = true;
+        stopTimer();
+        renderTest();
+
+        google.script.run
+          .withSuccessHandler(function (result) {
+            state.submitting = false;
+
+            if (!result || !result.success) {
+              if (!isAutomatic) startTimer();
+              openModal('alert', 'Tes Gagal Disimpan', result && result.message ? result.message : 'Respons server tidak valid.');
+              renderTest();
+              return;
+            }
+
+            safeLocalStorageRemove(timerKey());
+            safeLocalStorageRemove(answersKey());
+            state.answers = {};
+
+            openModal(
+              'success',
+              'Tes Berhasil Dikumpulkan',
+              result.emailSent === false
+                ? 'Jawaban telah tersimpan. Namun, email konfirmasi belum berhasil dikirim. HR tetap dapat melihat hasil tes Anda.'
+                : 'Jawaban telah tersimpan dan status Anda sudah diperbarui.',
+              function () {
+                state.view = 'dashboard';
+                loadPortalData();
+              }
+            );
+          })
+          .withFailureHandler(function (error) {
+            state.submitting = false;
+            if (!isAutomatic) startTimer();
+            openModal('alert', 'Koneksi Gagal', errorMessage(error));
+            renderTest();
+          })
+          .submitKognitif(state.applicantId, state.answers);
+      }
+
+      function renderContract() {
+        var clausesHtml = '';
+
+        state.clauses.forEach(function (clause, index) {
+          clausesHtml +=
+            '<article class="clause">' +
+              '<h3>Pasal ' + (index + 1) + ': ' + escapeHtml(clause.title) + '</h3>' +
+              '<p>' + escapeHtml(clause.content) + '</p>' +
+            '</article>';
+        });
+
+        app.innerHTML =
+          '<div class="shell">' +
+            pageHeaderHtml() +
+            '<main class="panel">' +
+              '<div class="contract-head">' +
+                '<h2 class="panel-title">SURAT PERJANJIAN KERJA</h2>' +
+                '<p class="panel-subtitle">Posisi: <strong>' + escapeHtml(state.profile.position) + '</strong></p>' +
+              '</div>' +
+              '<div class="contract-scroll">' +
+                (clausesHtml || '<p class="panel-subtitle">Template perjanjian belum tersedia.</p>') +
+              '</div>' +
+              '<div class="sign-box">' +
+                '<label class="check-row">' +
+                  '<input type="checkbox" id="agreement-check">' +
+                  '<span>Saya telah membaca dan menyetujui seluruh pasal dalam perjanjian ini.</span>' +
+                '</label>' +
+                '<input class="text-input" id="signature-name" value="' + escapeHtml(state.profile.name || '') + '" placeholder="Ketik nama lengkap">' +
+                '<button class="btn btn-green btn-full" style="margin-top:14px" id="sign-contract">KIRIM PERSETUJUAN KONTRAK</button>' +
+              '</div>' +
+              '<div class="toolbar">' +
+                '<button class="btn btn-light" id="back-dashboard">← Kembali ke Dashboard</button>' +
+              '</div>' +
+            '</main>' +
+          '</div>';
+
+        document.getElementById('back-dashboard').onclick = function () {
+          state.view = 'dashboard';
+          render();
+        };
+
+        document.getElementById('sign-contract').onclick = function () {
+          var agreed = document.getElementById('agreement-check').checked;
+          var fullName = document.getElementById('signature-name').value.trim();
+
+          if (!agreed || !fullName) {
+            openModal('alert', 'Data Belum Lengkap', 'Centang persetujuan dan ketik nama lengkap Anda.');
+            return;
+          }
+
+          openModal(
+            'confirm',
+            'Konfirmasi Tanda Tangan',
+            'Persetujuan ini akan dicatat sebagai tanda tangan digital dan menghasilkan dokumen PDF.',
+            function () { submitSignature(fullName); }
+          );
+        };
+      }
+
+      function submitSignature(fullName) {
+        renderLoading('Membuat dokumen PDF dan menyimpan tanda tangan digital...');
+
+        google.script.run
+          .withSuccessHandler(function (result) {
+            if (!result || !result.success) {
+              openModal('alert', 'Tanda Tangan Gagal', result && result.message ? result.message : 'Respons server tidak valid.');
+              state.view = 'contract';
+              render();
+              return;
+            }
+
+            state.pdfUrl = result.pdfUrl || '';
+            state.view = 'success';
+            render();
+
+            if (result.emailSent === false) {
+              openModal(
+                'alert',
+                'Kontrak Berhasil Disimpan',
+                'Tanda tangan dan PDF berhasil dibuat, tetapi email konfirmasi belum berhasil dikirim.'
+              );
+            }
+          })
+          .withFailureHandler(function (error) {
+            openModal('alert', 'Koneksi Gagal', errorMessage(error));
+            state.view = 'contract';
+            render();
+          })
+          .submitOnboardingSignature(state.applicantId, fullName);
+      }
+
+      function renderSuccess() {
+        app.innerHTML =
+          '<div class="shell">' +
+            pageHeaderHtml() +
+            '<main class="panel success-panel">' +
+              '<div class="big-icon">🎊</div>' +
+              '<h2>Terima Kasih!</h2>' +
+              '<p>Kontrak digital Anda telah tersimpan dan status kandidat diperbarui menjadi Active.</p>' +
+              '<div class="toolbar" style="justify-content:center">' +
+                (state.pdfUrl
+                  ? '<a class="btn btn-light" href="' + escapeHtml(state.pdfUrl) + '" target="_blank" rel="noopener">Buka Dokumen PDF</a>'
+                  : '') +
+                '<button class="btn" id="success-home">Kembali ke Halaman Awal</button>' +
+              '</div>' +
+            '</main>' +
+          '</div>';
+
+        document.getElementById('success-home').onclick = goHome;
+      }
+
+      function render() {
+        if (state.loading) {
+          renderLoading('Memuat data kandidat...');
+          return;
+        }
+
+        if (!state.profile) {
+          renderSessionMissing('Data kandidat tidak berhasil dimuat.');
+          return;
+        }
+
+        if (state.view === 'test') {
+          renderTest();
+        } else if (state.view === 'contract') {
+          renderContract();
+        } else if (state.view === 'success') {
+          renderSuccess();
+        } else {
+          renderDashboard();
+        }
+      }
+
+      function loadPortalData() {
+        stopTimer();
+        state.loading = true;
+        state.profile = null;
+        state.questions = [];
+        state.clauses = [];
+        state.view = 'dashboard';
+        render();
+
+        if (!state.applicantId) {
+          state.loading = false;
+          renderSessionMissing();
+          return;
+        }
+
+        google.script.run
+          .withSuccessHandler(function (result) {
+            if (!result || !result.success) {
+              state.loading = false;
+              renderSessionMissing(result && result.message ? result.message : 'ID Pelamar tidak ditemukan.');
+              return;
+            }
+
+            state.profile = result.data;
+            state.loading = false;
+            render();
+
+            if (state.profile.status === 'Penilaian Cognitive' && !state.profile.hasSubmittedTest) {
+              loadQuestions();
+            }
+
+            if (state.profile.status === 'Onboarding' && !state.profile.hasSigned) {
+              loadClauses();
+            }
+          })
+          .withFailureHandler(function (error) {
+            state.loading = false;
+            renderSessionMissing(errorMessage(error));
+          })
+          .getApplicantPortalData(state.applicantId);
+      }
+
+      function loadQuestions() {
+        google.script.run
+          .withSuccessHandler(function (result) {
+            state.questions = result && result.success && Array.isArray(result.data) ? result.data : [];
+            renderDashboard();
+
+            if (result && !result.success) {
+              openModal('alert', 'Soal Tidak Dapat Dimuat', result.message || 'Terjadi kesalahan saat mengambil soal.');
+            }
+          })
+          .withFailureHandler(function (error) {
+            state.questions = [];
+            renderDashboard();
+            openModal('alert', 'Soal Tidak Dapat Dimuat', errorMessage(error));
+          })
+          .getKognitifQuestionsForApplicant(state.applicantId);
+      }
+
+      function loadClauses() {
+        google.script.run
+          .withSuccessHandler(function (result) {
+            state.clauses = result && result.success && Array.isArray(result.data) ? result.data : [];
+            renderDashboard();
+
+            if (result && !result.success) {
+              openModal('alert', 'Perjanjian Tidak Dapat Dimuat', result.message || 'Terjadi kesalahan saat mengambil perjanjian.');
+            }
+          })
+          .withFailureHandler(function (error) {
+            state.clauses = [];
+            renderDashboard();
+            openModal('alert', 'Perjanjian Tidak Dapat Dimuat', errorMessage(error));
+          })
+          .getOnboardingClausesForApplicant(state.applicantId);
+      }
+
+      function goHome() {
+        stopTimer();
+        safeLocalStorageRemove('id_pelamar_aktif');
+        renderLoading('Membuka halaman utama...');
+
+        try {
+          window.top.location.href = buildGitHubPageUrl('index.html');
+        } catch (ignored) {
+          window.location.href = buildGitHubPageUrl('index.html');
+        }
+      }
+
+      function init() {
+        state.applicantId = String(safeLocalStorageGet('id_pelamar_aktif') || '').trim();
+
+        if (!state.applicantId) {
+          state.loading = false;
+          renderSessionMissing();
+          return;
+        }
+
+        loadPortalData();
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>
