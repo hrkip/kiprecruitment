@@ -6,8 +6,9 @@
   <title>Portal Kandidat</title>
 
   <script>
-    window.KIP_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbye10iCJKYg-GRxtmD0SUgbkaLPb7w9XDPN2BSCtRjPHinDTxCd7wzkoXrV4_Gf6ZvC/exec';
+    window.KIP_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz-TbIJPwI52m5JJ-hA0JcAkNiXOJzaqtElKPDyYKQqFD6YOqC27jJ7zJKGiu2pU5LS/exec';
   </script>
+  <link rel="preload" as="image" href="./kip-logo.webp">
   <script src="./kip-api.js"></script>
   <style>
     :root {
@@ -64,17 +65,33 @@
     }
 
     .brand-mark {
-      width: 54px;
-      height: 54px;
+      width: 160px;
+      height: 82px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       margin-bottom: 12px;
-      border-radius: 17px;
-      background: #111827;
-      color: #fff;
-      font-weight: 900;
-      font-size: 22px;
+      border-radius: 16px;
+      background: #fff;
+      border: 1px solid var(--line);
+      overflow: hidden;
+      box-shadow: 0 9px 24px rgba(17, 24, 39, .09);
+    }
+
+    .brand-mark img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      padding: 6px;
+    }
+
+    .message-logo {
+      width: 150px;
+      height: 78px;
+      margin: 0 auto 14px;
+      object-fit: contain;
+      display: block;
     }
 
     .header h1 {
@@ -533,6 +550,7 @@
         app.innerHTML =
           '<div class="fatal">' +
             '<div class="message-card" style="border-color:#fecaca">' +
+              '<img class="message-logo" src="./kip-logo.webp" alt="KIP">' +
               '<div class="message-icon">⚠️</div>' +
               '<h2 style="color:#b91c1c">Portal Kandidat gagal dimuat</h2>' +
               '<p>Terjadi kesalahan JavaScript. Detail:</p>' +
@@ -610,6 +628,7 @@
         app.innerHTML =
           '<div class="loader-wrap">' +
             '<div class="message-card">' +
+              '<img class="message-logo" src="./kip-logo.webp" alt="KIP">' +
               '<div class="spinner"></div>' +
               '<h2>Mohon Tunggu</h2>' +
               '<p>' + escapeHtml(message || 'Memuat data kandidat...') + '</p>' +
@@ -621,6 +640,7 @@
         app.innerHTML =
           '<div class="error-wrap">' +
             '<div class="message-card">' +
+              '<img class="message-logo" src="./kip-logo.webp" alt="KIP">' +
               '<div class="message-icon">🔐</div>' +
               '<h2>Sesi kandidat tidak ditemukan</h2>' +
               '<p>' + escapeHtml(message || 'Silakan kembali ke halaman utama dan login menggunakan ID Pelamar Anda.') + '</p>' +
@@ -637,7 +657,7 @@
         var p = state.profile || {};
         return (
           '<header class="header">' +
-            '<div class="brand-mark">KIP</div>' +
+            '<div class="brand-mark"><img src="./kip-logo.webp" alt="Kampung Inggris Pontianak"></div>' +
             '<h1>Portal Kandidat</h1>' +
             '<div class="header-meta">ID Pelamar: <strong style="color:#dc2626">' + escapeHtml(state.applicantId) + '</strong></div>' +
             '<div class="candidate-name">' + escapeHtml(p.name || '-') + ' <span style="color:#9ca3af">•</span> ' + escapeHtml(p.position || '-') + '</div>' +
