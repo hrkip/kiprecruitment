@@ -6,8 +6,9 @@
   <meta name="color-scheme" content="light">
   <title>Admin Dashboard KIP</title>
   <script>
-    window.KIP_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbye10iCJKYg-GRxtmD0SUgbkaLPb7w9XDPN2BSCtRjPHinDTxCd7wzkoXrV4_Gf6ZvC/exec';
+    window.KIP_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz-TbIJPwI52m5JJ-hA0JcAkNiXOJzaqtElKPDyYKQqFD6YOqC27jJ7zJKGiu2pU5LS/exec';
   </script>
+  <link rel="preload" as="image" href="./kip-logo.webp">
   <script src="./kip-api.js"></script>
   <style>
     :root {
@@ -18,7 +19,7 @@
     *{box-sizing:border-box} html{scroll-behavior:smooth} body{margin:0;background:var(--canvas);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
     button,input,select,textarea{font:inherit} button{border:0;cursor:pointer}.hidden{display:none!important}
     .app{height:100vh;display:flex;overflow:hidden}.sidebar{width:258px;flex:0 0 258px;background:#090d16;color:#fff;display:flex;flex-direction:column;transition:margin .2s ease,transform .2s ease;box-shadow:14px 0 40px rgba(17,24,39,.12);z-index:30}.sidebar.closed{margin-left:-258px}
-    .sidebar-head{height:78px;padding:18px 20px;border-bottom:1px solid #202633;display:flex;align-items:center;gap:12px}.brand-mark{width:42px;height:42px;border-radius:13px;background:var(--red);display:grid;place-items:center;font-weight:900}.brand-copy strong{display:block}.brand-copy span{font-size:12px;color:#9ca3af}
+    .sidebar-head{height:88px;padding:14px 16px;border-bottom:1px solid #202633;display:flex;align-items:center;gap:12px}.brand-mark{width:82px;height:56px;border-radius:12px;background:#fff;border:1px solid #2d3544;display:grid;place-items:center;overflow:hidden;box-shadow:0 7px 18px rgba(0,0,0,.2)}.brand-mark img{width:100%;height:100%;object-fit:contain;padding:4px;display:block}.brand-copy strong{display:block}.brand-copy span{font-size:12px;color:#9ca3af}.top-brand{display:flex;align-items:center;gap:10px}.top-logo{width:70px;height:42px;border-radius:10px;background:#fff;border:1px solid var(--line);overflow:hidden;display:grid;place-items:center}.top-logo img{width:100%;height:100%;object-fit:contain;padding:3px;display:block}
     .nav{padding:18px 12px;display:grid;gap:7px;flex:1;overflow:auto}.nav-btn{width:100%;padding:13px 14px;border-radius:12px;background:transparent;color:#aeb6c4;text-align:left;font-weight:750;transition:.15s}.nav-btn:hover{background:#171d29;color:#fff}.nav-btn.active{background:var(--red);color:#fff}.sidebar-foot{padding:14px;border-top:1px solid #202633}.logout{width:100%;padding:12px;border-radius:11px;background:#171d29;color:white;font-weight:800}.logout:hover{background:var(--red)}
     .workspace{min-width:0;flex:1;display:flex;flex-direction:column}.topbar{height:70px;flex:0 0 70px;background:white;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 22px;box-shadow:0 3px 16px rgba(17,24,39,.04);z-index:20}.top-left{display:flex;align-items:center;gap:13px}.menu-btn{width:42px;height:42px;border-radius:12px;background:#f3f4f6;color:#374151;font-size:20px}.top-title{font-size:18px;font-weight:900;letter-spacing:.04em}.avatar{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;background:#e5e7eb;font-weight:900;color:#4b5563}.content{flex:1;overflow:auto;padding:26px}.content-inner{width:min(100%,1400px);margin:0 auto}
     .page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:22px}.page-head h1{margin:0;font-size:27px;letter-spacing:-.035em}.page-head p{margin:7px 0 0;color:var(--muted);font-size:14px}.role-select{min-width:190px;padding:10px 12px;border:1px solid #d1d5db;border-radius:11px;background:#fff;font-weight:800;outline:none}
@@ -41,7 +42,7 @@
 <body>
   <div class="app">
     <aside id="sidebar" class="sidebar">
-      <div class="sidebar-head"><div class="brand-mark">A</div><div class="brand-copy"><strong>ADMIN</strong><span>Portal Rekrutmen</span></div></div>
+      <div class="sidebar-head"><div class="brand-mark"><img src="./kip-logo.webp" alt="KIP"></div><div class="brand-copy"><strong>ADMIN</strong><span>Portal Rekrutmen</span></div></div>
       <nav class="nav" id="main-nav">
         <button class="nav-btn active" data-tab="dashboard">📊 Dashboard Utama</button>
         <button class="nav-btn" data-tab="cognitive">🧠 Penilaian Kognitif</button>
@@ -54,7 +55,7 @@
     </aside>
 
     <section class="workspace">
-      <header class="topbar"><div class="top-left"><button id="menu" class="menu-btn">☰</button><div class="top-title">HR PORTAL</div></div><div class="avatar">HR</div></header>
+      <header class="topbar"><div class="top-left"><button id="menu" class="menu-btn">☰</button><div class="top-brand"><div class="top-logo"><img src="./kip-logo.webp" alt="KIP"></div><div class="top-title">HR PORTAL</div></div></div><div class="avatar">HR</div></header>
       <main class="content"><div id="view" class="content-inner"><div class="loading"><div class="loading-box"><div class="spinner"></div><strong>Memuat dashboard...</strong></div></div></div></main>
     </section>
   </div>
@@ -84,6 +85,38 @@
       const activeApplicants=()=>state.applicants.filter(a=>a['ID Pelamar']);
       const errorText=e=>e&&e.message?e.message:String(e||'Terjadi kesalahan.');
       const api=(action,...args)=>KIP_API.call(action,...args);
+
+      function captureViewScroll(){
+        const content=document.querySelector('.content');
+        return {
+          contentTop:content?content.scrollTop:0,
+          tableScrolls:Array.from(view.querySelectorAll('.table-wrap')).map(el=>({top:el.scrollTop,left:el.scrollLeft}))
+        };
+      }
+
+      function restoreViewScroll(snapshot){
+        if(!snapshot)return;
+        requestAnimationFrame(()=>{
+          const content=document.querySelector('.content');
+          if(content)content.scrollTop=snapshot.contentTop||0;
+          Array.from(view.querySelectorAll('.table-wrap')).forEach((el,index)=>{
+            const saved=snapshot.tableScrolls[index];
+            if(saved){el.scrollTop=saved.top||0;el.scrollLeft=saved.left||0}
+          });
+        });
+      }
+
+      function setModalHtml(html,preserveScroll=true){
+        const oldModal=modalRoot.querySelector('.modal');
+        const oldTop=oldModal?oldModal.scrollTop:0;
+        modalRoot.innerHTML=html;
+        if(preserveScroll&&oldTop){
+          requestAnimationFrame(()=>{
+            const newModal=modalRoot.querySelector('.modal');
+            if(newModal)newModal.scrollTop=oldTop;
+          });
+        }
+      }
 
       function loading(message){return `<div class="loading"><div class="loading-box"><div class="spinner"></div><strong>${esc(message||'Memuat data...')}</strong></div></div>`}
       function empty(message){return `<div class="empty">${esc(message)}</div>`}
@@ -124,7 +157,9 @@
         else if(state.tab==='recap'){loadDashboard();loadRoleSection('recap')}
       }
 
-      function render(){
+      function render(options){
+        const preserve=!(options&&options.preserveScroll===false);
+        const snapshot=preserve?captureViewScroll():null;
         document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===state.tab));
         if(state.tab==='dashboard')renderDashboard();
         else if(state.tab==='cognitive')renderCognitive();
@@ -132,6 +167,11 @@
         else if(state.tab==='onboarding')renderOnboarding();
         else if(state.tab==='notifications')renderNotifications();
         else renderRecap();
+        if(snapshot)restoreViewScroll(snapshot);
+        else{
+          const content=document.querySelector('.content');
+          if(content)content.scrollTop=0;
+        }
       }
 
       function renderDashboard(){
@@ -192,14 +232,36 @@
       async function submitGrading(){const modal=state.gradingModal;if(!modal)return;const total=Object.values(modal.answers).reduce((a,b)=>a+Number(b||0),0);try{const app=modal.app;const r=await api('submitInterviewResult',app['ID Pelamar'],app.Nama,app.Posisi,total,modal.answers);if(!r?.success)throw new Error(r?.message||'Nilai gagal disimpan.');closeModal();getRole()._loaded_interview=false;await loadRoleSection('interview',true);await loadDashboard(true);showDialog('success','Nilai Tersimpan','Total skor kandidat: '+total)}catch(e){showDialog('alert','Gagal',errorText(e))}}
 
       function renderModal(){
-        if(state.dialog){const d=state.dialog;modalRoot.innerHTML=`<div class="backdrop"><section class="modal"><div class="dialog"><div class="dialog-icon ${d.type}">${d.type==='confirm'?'?':d.type==='success'?'✓':'!'}</div><h2>${esc(d.title)}</h2><p>${esc(d.message)}</p><div class="toolbar" style="justify-content:center">${d.type==='confirm'?'<button class="btn btn-light" data-modal="cancel">Batal</button>':''}<button class="btn btn-dark" data-modal="confirm">${d.type==='confirm'?'Ya, Lanjutkan':'Tutup'}</button></div></div></section></div>`;return}
-        if(state.selectedDetail){const d=state.selectedDetail;modalRoot.innerHTML=`<div class="backdrop"><section class="modal"><div class="modal-head"><div><h2>${esc(d.title)}</h2><p>ID: ${esc(d.id)}</p></div><button class="close" data-modal="close">×</button></div><div class="modal-body"><div class="notice" style="white-space:pre-wrap;background:#fafafa;color:#374151;border-color:#e5e7eb">${esc(d.content)}</div></div></section></div>`;return}
-        if(state.interviewModal){const m=state.interviewModal;modalRoot.innerHTML=`<div class="backdrop"><section class="modal"><div class="modal-head"><div><h2>Atur Jadwal Wawancara</h2><p>Kandidat: ${esc(m.app.Nama||'Kandidat')}</p></div><button class="close" data-modal="close">×</button></div><div class="modal-body"><div class="radio-grid"><button class="radio-choice ${m.type==='online'?'active':''}" data-modal="interview-type" data-value="online">🌐 Online</button><button class="radio-choice ${m.type==='offline'?'active':''}" data-modal="interview-type" data-value="offline">🏢 Offline</button></div><label class="field" style="display:grid;gap:7px;margin-top:15px"><strong class="tiny">TANGGAL & WAKTU</strong><input class="input" type="datetime-local" data-modal-input="datetime" value="${esc(m.datetime||'')}"></label><label class="field" style="display:grid;gap:7px;margin-top:15px"><strong class="tiny">${m.type==='online'?'LINK GOOGLE MEET / ZOOM':'ALAMAT LENGKAP'}</strong><textarea class="textarea" data-modal-input="location">${esc(m.location||'')}</textarea></label></div><div class="modal-foot"><button class="btn btn-light" data-modal="close">Batal</button><button class="btn btn-dark" data-modal="send-interview">Simpan & Kirim WA</button></div></section></div>`;return}
-        if(state.gradingModal){const m=state.gradingModal;const q=getRole().interviewQuestions||[];const total=Object.values(m.answers).reduce((a,b)=>a+Number(b||0),0);modalRoot.innerHTML=`<div class="backdrop"><section class="modal wide"><div class="modal-head"><div><h2>Form Penilaian Wawancara</h2><p>Kandidat: ${esc(m.app.Nama)}</p></div><button class="close" data-modal="close">×</button></div><div class="modal-body grading-list">${q.map((item,i)=>`<div class="grading-item"><p>${i+1}. ${esc(item.question)}</p><div class="score-buttons">${[1,2,3].map(score=>`<button class="score-btn s${score} ${Number(m.answers[item.id])===score?'active':''}" data-modal="grade-score" data-qid="${esc(item.id)}" data-score="${score}">${score} - ${score===1?'Tidak Relevan':score===2?'Relevan':'Sangat Relevan'}</button>`).join('')}</div></div>`).join('')}</div><div class="modal-foot"><strong style="margin-right:auto">Total: ${total}</strong><button class="btn btn-blue" data-modal="submit-grading">Simpan Nilai</button></div></section></div>`;return}
-        modalRoot.innerHTML='';
+        if(state.dialog){
+          const d=state.dialog;
+          setModalHtml(`<div class="backdrop"><section class="modal"><div class="dialog"><img src="./kip-logo.webp" alt="KIP" style="width:128px;height:70px;object-fit:contain;margin:0 auto 10px;display:block"><div class="dialog-icon ${d.type}">${d.type==='confirm'?'?':d.type==='success'?'✓':'!'}</div><h2>${esc(d.title)}</h2><p>${esc(d.message)}</p><div class="toolbar" style="justify-content:center">${d.type==='confirm'?'<button class="btn btn-light" data-modal="cancel">Batal</button>':''}<button class="btn btn-dark" data-modal="confirm">${d.type==='confirm'?'Ya, Lanjutkan':'Tutup'}</button></div></div></section></div>`,false);
+          return;
+        }
+
+        if(state.selectedDetail){
+          const d=state.selectedDetail;
+          setModalHtml(`<div class="backdrop"><section class="modal"><div class="modal-head"><div><h2>${esc(d.title)}</h2><p>ID: ${esc(d.id)}</p></div><button class="close" data-modal="close">×</button></div><div class="modal-body"><div class="notice" style="white-space:pre-wrap;background:#fafafa;color:#374151;border-color:#e5e7eb">${esc(d.content)}</div></div></section></div>`);
+          return;
+        }
+
+        if(state.interviewModal){
+          const m=state.interviewModal;
+          setModalHtml(`<div class="backdrop"><section class="modal"><div class="modal-head"><div style="display:flex;align-items:center;gap:12px"><img src="./kip-logo.webp" alt="KIP" style="width:88px;height:52px;object-fit:contain"><div><h2>Atur Jadwal Wawancara</h2><p>Kandidat: ${esc(m.app.Nama||'Kandidat')}</p></div></div><button class="close" data-modal="close">×</button></div><div class="modal-body"><div class="radio-grid"><button class="radio-choice ${m.type==='online'?'active':''}" data-modal="interview-type" data-value="online">🌐 Online</button><button class="radio-choice ${m.type==='offline'?'active':''}" data-modal="interview-type" data-value="offline">🏢 Offline</button></div><label class="field" style="display:grid;gap:7px;margin-top:15px"><strong class="tiny">TANGGAL & WAKTU</strong><input class="input" type="datetime-local" data-modal-input="datetime" value="${esc(m.datetime||'')}"></label><label class="field" style="display:grid;gap:7px;margin-top:15px"><strong class="tiny">${m.type==='online'?'LINK GOOGLE MEET / ZOOM':'ALAMAT LENGKAP'}</strong><textarea class="textarea" data-modal-input="location">${esc(m.location||'')}</textarea></label></div><div class="modal-foot"><button class="btn btn-light" data-modal="close">Batal</button><button class="btn btn-dark" data-modal="send-interview">Simpan & Kirim WA</button></div></section></div>`);
+          return;
+        }
+
+        if(state.gradingModal){
+          const m=state.gradingModal;
+          const q=getRole().interviewQuestions||[];
+          const total=Object.values(m.answers).reduce((a,b)=>a+Number(b||0),0);
+          setModalHtml(`<div class="backdrop"><section class="modal wide"><div class="modal-head"><div style="display:flex;align-items:center;gap:12px"><img src="./kip-logo.webp" alt="KIP" style="width:92px;height:54px;object-fit:contain"><div><h2>Form Penilaian Wawancara</h2><p>Kandidat: ${esc(m.app.Nama)}</p></div></div><button class="close" data-modal="close">×</button></div><div class="modal-body grading-list">${q.map((item,i)=>`<div class="grading-item" data-grading-qid="${esc(item.id)}"><p>${i+1}. ${esc(item.question)}</p><div class="score-buttons">${[1,2,3].map(score=>`<button class="score-btn s${score} ${Number(m.answers[item.id])===score?'active':''}" data-modal="grade-score" data-qid="${esc(item.id)}" data-score="${score}">${score} - ${score===1?'Tidak Relevan':score===2?'Relevan':'Sangat Relevan'}</button>`).join('')}</div></div>`).join('')}</div><div class="modal-foot"><strong id="grading-total" style="margin-right:auto">Total: ${total}</strong><button class="btn btn-blue" data-modal="submit-grading">Simpan Nilai</button></div></section></div>`);
+          return;
+        }
+
+        setModalHtml('',false);
       }
 
-      document.getElementById('main-nav').addEventListener('click',e=>{const b=e.target.closest('[data-tab]');if(!b)return;state.tab=b.dataset.tab;if(innerWidth<760){state.sidebar=false;document.getElementById('sidebar').classList.add('closed')}render();ensureTabData()});
+      document.getElementById('main-nav').addEventListener('click',e=>{const b=e.target.closest('[data-tab]');if(!b)return;state.tab=b.dataset.tab;if(innerWidth<760){state.sidebar=false;document.getElementById('sidebar').classList.add('closed')}render({preserveScroll:false});ensureTabData()});
       document.getElementById('menu').addEventListener('click',()=>{state.sidebar=!state.sidebar;document.getElementById('sidebar').classList.toggle('closed',!state.sidebar)});
       document.getElementById('logout').addEventListener('click',()=>showDialog('confirm','Keluar Sistem','Yakin ingin keluar dari Dashboard HR?',()=>{location.href=KIP_API.buildPageUrl('index.html')}));
 
@@ -251,7 +313,14 @@
         else if(action==='confirm'){const cb=state.dialog&&state.dialog.onConfirm;state.dialog=null;renderModal();if(typeof cb==='function')cb()}
         else if(action==='interview-type'){state.interviewModal.type=b.dataset.value;renderModal()}
         else if(action==='send-interview'){const m=state.interviewModal;if(!m.datetime||!m.location.trim()){showDialog('alert','Data Belum Lengkap','Isi jadwal wawancara dan link/lokasi.');return}const app=m.app;const date=new Date(m.datetime).toLocaleString('id-ID',{dateStyle:'full',timeStyle:'short'});let msg=`Halo ${app.Nama}, selamat! Anda lolos ke tahap Wawancara untuk posisi ${app.Posisi}.\n\nJadwal: ${date} WIB\n`;msg+=m.type==='online'?`Format: Online\nLink: ${m.location}\n`:`Format: Offline\nLokasi: ${m.location}\n`;const no=String(app.NoWA||'').replace(/\D/g,'').replace(/^0/,'62');window.open(`https://wa.me/${no}?text=${encodeURIComponent(msg)}`,'_blank');const details={type:m.type,datetime:m.datetime,location:m.location};const id=app['ID Pelamar'];closeModal();updateStatus(id,'Wawancara',details)}
-        else if(action==='grade-score'){state.gradingModal.answers[b.dataset.qid]=+b.dataset.score;renderModal()}
+        else if(action==='grade-score'){
+          state.gradingModal.answers[b.dataset.qid]=+b.dataset.score;
+          const group=b.closest('.score-buttons');
+          if(group)group.querySelectorAll('.score-btn').forEach(btn=>btn.classList.toggle('active',btn===b));
+          const total=Object.values(state.gradingModal.answers).reduce((sum,value)=>sum+Number(value||0),0);
+          const totalEl=document.getElementById('grading-total');
+          if(totalEl)totalEl.textContent='Total: '+total;
+        }
         else if(action==='submit-grading')submitGrading();
       });
 
