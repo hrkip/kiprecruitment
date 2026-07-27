@@ -6,8 +6,9 @@
   <meta name="color-scheme" content="light">
   <title>Portal Karir KIP</title>
   <script>
-    window.KIP_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbye10iCJKYg-GRxtmD0SUgbkaLPb7w9XDPN2BSCtRjPHinDTxCd7wzkoXrV4_Gf6ZvC/exec';
+    window.KIP_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz-TbIJPwI52m5JJ-hA0JcAkNiXOJzaqtElKPDyYKQqFD6YOqC27jJ7zJKGiu2pU5LS/exec';
   </script>
+  <link rel="preload" as="image" href="./kip-logo.webp">
   <script src="./kip-api.js" defer></script>
   <style>
     :root {
@@ -48,12 +49,17 @@
     }
     .brand { display: flex; align-items: center; gap: 12px; font-weight: 900; }
     .brand-mark {
-      width: 44px; height: 44px; border-radius: 14px;
-      display: grid; place-items: center;
-      background: linear-gradient(145deg, #111827, #333b49);
-      color: #fff; letter-spacing: -.04em;
-      box-shadow: 0 8px 20px rgba(17,24,39,.18);
+      width: 58px; height: 44px; border-radius: 12px;
+      display: grid; place-items: center; overflow: hidden;
+      background: #fff; border: 1px solid var(--line);
+      box-shadow: 0 8px 20px rgba(17,24,39,.12);
     }
+    .brand-mark img { width: 100%; height: 100%; object-fit: contain; display: block; padding: 3px; }
+    .modal-icon.logo {
+      width: 118px; height: 70px; padding: 5px; background: #fff;
+      border: 1px solid var(--line); overflow: hidden;
+    }
+    .modal-icon.logo img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .nav-actions { display: flex; align-items: center; gap: 10px; }
     .btn {
       border: 0; border-radius: 12px; min-height: 44px; padding: 11px 17px;
@@ -134,7 +140,7 @@
   <div class="page">
     <nav class="nav">
       <div class="brand">
-        <div class="brand-mark">KIP</div>
+        <div class="brand-mark"><img src="./kip-logo.webp" alt="Kampung Inggris Pontianak"></div>
         <span class="brand-name">Kampung Inggris Pontianak</span>
       </div>
       <div class="nav-actions">
@@ -244,7 +250,7 @@
   <div id="login-backdrop" class="backdrop hidden">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
       <button class="modal-close" id="close-login" type="button" aria-label="Close">×</button>
-      <div class="modal-icon" id="login-icon">A</div>
+      <div class="modal-icon logo" id="login-icon"><img src="./kip-logo.webp" alt="KIP"></div>
       <h2 id="login-title">Login Admin</h2>
       <form id="login-form" class="modal-form">
         <div id="admin-login-fields">
@@ -451,9 +457,24 @@
         loginEnter.classList.add('hidden');
         document.getElementById('login-submit').classList.remove('hidden');
         document.getElementById('login-title').textContent = 'Login ' + type;
-        document.getElementById('login-icon').textContent = type === 'Admin' ? 'A' : 'P';
+        document.getElementById('login-icon').innerHTML = '<img src="./kip-logo.webp" alt="KIP">';
         document.getElementById('admin-login-fields').classList.toggle('hidden', type !== 'Admin');
         document.getElementById('applicant-login-fields').classList.toggle('hidden', type === 'Admin');
+
+        const adminUsername = document.getElementById('admin-username');
+        const adminPassword = document.getElementById('admin-password');
+        const rememberAdmin = document.getElementById('remember-admin');
+        const applicantIdField = document.getElementById('applicant-id');
+        const adminActive = type === 'Admin';
+
+        adminUsername.disabled = !adminActive;
+        adminPassword.disabled = !adminActive;
+        rememberAdmin.disabled = !adminActive;
+        adminUsername.required = adminActive;
+        adminPassword.required = adminActive;
+
+        applicantIdField.disabled = adminActive;
+        applicantIdField.required = !adminActive;
 
         if (type === 'Admin') {
           document.getElementById('admin-username').value = safeGet('hr_username');
@@ -499,7 +520,7 @@
               }
             }
           } else {
-            const applicantId = document.getElementById('applicant-id').value.trim();
+            const applicantId = document.getElementById('applicant-id').value.trim().toUpperCase();
             if (!applicantId) throw new Error('ID Pelamar wajib diisi.');
             result = await KIP_API.call('verifyPelamarLogin', applicantId);
             nextPage = 'Pelamar.html';
@@ -510,11 +531,19 @@
             throw new Error(result && result.message ? result.message : 'Akun tidak valid.');
           }
 
+          const destination = KIP_API.buildPageUrl(nextPage);
           loginStatus.className = 'status-message success';
-          loginStatus.textContent = 'Verifikasi berhasil. Silakan masuk.';
-          loginEnter.href = KIP_API.buildPageUrl(nextPage);
+          loginStatus.textContent = 'Verifikasi berhasil. Membuka portal...';
+          loginEnter.href = destination;
           loginEnter.classList.remove('hidden');
+          loginEnter.textContent = 'Buka Portal Sekarang';
           button.classList.add('hidden');
+
+          // Direct navigation makes the verification button complete the login flow.
+          // The visible link remains as a fallback if browser navigation is interrupted.
+          window.setTimeout(function () {
+            window.location.assign(destination);
+          }, 180);
         } catch (error) {
           loginStatus.className = 'status-message error';
           loginStatus.textContent = error.message || String(error);
