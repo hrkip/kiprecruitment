@@ -6,251 +6,9 @@
   <title>Portal Kandidat</title>
 
   <script>
-    const GAS_API_URL = ''; // Automatically received from index.html and stored in this browser.
-
-    (function setupAppsScriptBridge() {
-      'use strict';
-
-      const STORAGE_KEY = 'kip_gas_api_url';
-      const CHANNEL = 'KIP_GAS_RPC';
-      const pendingRequests = new Map();
-      let requestCounter = 0;
-      let bridgeReady = false;
-      let bridgeIframe = null;
-      let bridgeReadyResolver = null;
-
-      function isValidApiUrl(value) {
-        return /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:[?#].*)?$/.test(
-          String(value || '').trim()
-        );
-      }
-
-      function saveApiUrl(value) {
-        if (!isValidApiUrl(value)) return;
-        try { localStorage.setItem(STORAGE_KEY, String(value).trim()); } catch (ignored) {}
-      }
-
-      function readStoredApiUrl() {
-        try { return localStorage.getItem(STORAGE_KEY) || ''; } catch (ignored) { return ''; }
-      }
-
-      function resolveApiUrl() {
-        const queryValue = new URLSearchParams(window.location.search).get('api') || '';
-
-        if (isValidApiUrl(queryValue)) {
-          saveApiUrl(queryValue);
-          return queryValue.trim();
-        }
-
-        if (isValidApiUrl(GAS_API_URL)) {
-          saveApiUrl(GAS_API_URL);
-          return GAS_API_URL.trim();
-        }
-
-        const storedValue = readStoredApiUrl();
-        return isValidApiUrl(storedValue) ? storedValue.trim() : '';
-      }
-
-      function clientBaseUrl() {
-        return new URL('.', window.location.href).href;
-      }
-
-      const apiUrl = resolveApiUrl();
-      window.KIP_API_URL = apiUrl;
-
-      window.buildGitHubPageUrl = function buildGitHubPageUrl(fileName) {
-        const url = new URL(fileName, window.location.href);
-        if (apiUrl) url.searchParams.set('api', apiUrl);
-        return url.href;
-      };
-
-      function initializeIframeBridge() {
-        if (!apiUrl || bridgeIframe) return;
-
-        bridgeIframe = document.createElement('iframe');
-        bridgeIframe.title = 'KIP Apps Script Bridge';
-        bridgeIframe.setAttribute('aria-hidden', 'true');
-        bridgeIframe.style.position = 'fixed';
-        bridgeIframe.style.width = '1px';
-        bridgeIframe.style.height = '1px';
-        bridgeIframe.style.opacity = '0';
-        bridgeIframe.style.pointerEvents = 'none';
-        bridgeIframe.style.border = '0';
-        bridgeIframe.style.left = '-9999px';
-        bridgeIframe.src = apiUrl;
-
-        (document.body || document.documentElement).appendChild(bridgeIframe);
-      }
-
-      window.addEventListener('message', function (event) {
-        if (!bridgeIframe || event.source !== bridgeIframe.contentWindow) return;
-
-        const payload = event.data || {};
-        if (payload.channel !== CHANNEL) return;
-
-        if (payload.type === 'ready') {
-          bridgeReady = true;
-          if (bridgeReadyResolver) {
-            bridgeReadyResolver(true);
-            bridgeReadyResolver = null;
-          }
-          return;
-        }
-
-        if (payload.type !== 'response' || !pendingRequests.has(payload.id)) return;
-
-        const pending = pendingRequests.get(payload.id);
-        pendingRequests.delete(payload.id);
-        clearTimeout(pending.timeoutId);
-
-        if (payload.ok === true) {
-          pending.resolve(payload.result);
-        } else {
-          pending.reject(new Error(payload.error || 'Apps Script request failed.'));
-        }
-      });
-
-      function waitForIframeBridge() {
-        initializeIframeBridge();
-
-        if (bridgeReady) return Promise.resolve(true);
-        if (!bridgeIframe) return Promise.resolve(false);
-
-        return new Promise(function (resolve) {
-          let settled = false;
-
-          bridgeReadyResolver = function (value) {
-            if (settled) return;
-            settled = true;
-            resolve(value);
-          };
-
-          setTimeout(function () {
-            if (settled) return;
-            settled = true;
-            bridgeReadyResolver = null;
-            resolve(false);
-          }, 8000);
-        });
-      }
-
-      function invokeThroughIframe(action, args) {
-        return new Promise(function (resolve, reject) {
-          const id = 'rpc-' + Date.now() + '-' + (++requestCounter);
-          const timeoutId = setTimeout(function () {
-            pendingRequests.delete(id);
-            reject(new Error('Apps Script bridge tidak merespons.'));
-          }, 60000);
-
-          pendingRequests.set(id, { resolve, reject, timeoutId });
-          bridgeIframe.contentWindow.postMessage({
-            channel: CHANNEL,
-            type: 'request',
-            id,
-            action,
-            args,
-            clientBaseUrl: clientBaseUrl()
-          }, '*');
-        });
-      }
-
-      async function invokeThroughFetch(action, args) {
-        const formBody = new URLSearchParams();
-        formBody.set('payload', JSON.stringify({
-          action,
-          args,
-          clientBaseUrl: clientBaseUrl()
-        }));
-
-        const response = await fetch(apiUrl, {
-          method: 'POST',
-          body: formBody,
-          redirect: 'follow'
-        });
-
-        const responseText = await response.text();
-        let payload;
-
-        try {
-          payload = JSON.parse(responseText);
-        } catch (error) {
-          throw new Error(
-            'Respons GAS bukan JSON. Pastikan deployment dijalankan sebagai pemilik dan aksesnya diatur ke Anyone.'
-          );
-        }
-
-        if (!payload || payload.ok !== true) {
-          throw new Error(payload && payload.error ? payload.error : 'Respons API tidak valid.');
-        }
-
-        return payload.result;
-      }
-
-      async function invokeApi(action, args) {
-        if (!apiUrl) {
-          throw new Error('GAS API URL belum tersedia. Buka index.html terlebih dahulu dari repository GitHub Pages yang sama.');
-        }
-
-        const ready = await waitForIframeBridge();
-
-        if (ready) {
-          try {
-            return await invokeThroughIframe(action, args);
-          } catch (iframeError) {
-            console.warn('Iframe bridge failed, using fetch fallback.', iframeError);
-          }
-        }
-
-        return invokeThroughFetch(action, args);
-      }
-
-      function createRunner(successHandler, failureHandler) {
-        return new Proxy({}, {
-          get: function (_target, property) {
-            if (property === 'withSuccessHandler') {
-              return function (handler) {
-                return createRunner(handler, failureHandler);
-              };
-            }
-
-            if (property === 'withFailureHandler') {
-              return function (handler) {
-                return createRunner(successHandler, handler);
-              };
-            }
-
-            return function () {
-              const args = Array.prototype.slice.call(arguments);
-
-              invokeApi(String(property), args)
-                .then(function (result) {
-                  if (typeof successHandler === 'function') successHandler(result);
-                })
-                .catch(function (error) {
-                  if (typeof failureHandler === 'function') {
-                    failureHandler(error);
-                  } else if (typeof successHandler === 'function') {
-                    successHandler({ success: false, message: error.message });
-                  } else {
-                    console.error(error);
-                  }
-                });
-            };
-          }
-        });
-      }
-
-      window.google = window.google || {};
-      window.google.script = window.google.script || {};
-      window.google.script.run = createRunner(null, null);
-
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initializeIframeBridge, { once: true });
-      } else {
-        initializeIframeBridge();
-      }
-    })();
+    window.KIP_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbye10iCJKYg-GRxtmD0SUgbkaLPb7w9XDPN2BSCtRjPHinDTxCd7wzkoXrV4_Gf6ZvC/exec';
   </script>
+  <script src="./kip-api.js"></script>
   <style>
     :root {
       --bg: #f5f6f8;
@@ -1078,7 +836,15 @@
             var letter = this.getAttribute('data-option');
             state.answers[question.id] = question['option' + letter];
             safeLocalStorageSet(answersKey(), JSON.stringify(state.answers));
-            renderTest();
+
+            var optionList = this.closest('.option-list');
+            if (optionList) {
+              Array.prototype.forEach.call(optionList.querySelectorAll('.option'), function (option) {
+                option.classList.remove('selected');
+              });
+              var selectedOption = this.closest('.option');
+              if (selectedOption) selectedOption.classList.add('selected');
+            }
           };
         });
 
@@ -1305,59 +1071,18 @@
               return;
             }
 
-            state.profile = result.data;
+            var bundle = result.data || {};
+            state.profile = bundle.profile || null;
+            state.questions = Array.isArray(bundle.questions) ? bundle.questions : [];
+            state.clauses = Array.isArray(bundle.clauses) ? bundle.clauses : [];
             state.loading = false;
             render();
-
-            if (state.profile.status === 'Penilaian Cognitive' && !state.profile.hasSubmittedTest) {
-              loadQuestions();
-            }
-
-            if (state.profile.status === 'Onboarding' && !state.profile.hasSigned) {
-              loadClauses();
-            }
           })
           .withFailureHandler(function (error) {
             state.loading = false;
             renderSessionMissing(errorMessage(error));
           })
-          .getApplicantPortalData(state.applicantId);
-      }
-
-      function loadQuestions() {
-        google.script.run
-          .withSuccessHandler(function (result) {
-            state.questions = result && result.success && Array.isArray(result.data) ? result.data : [];
-            renderDashboard();
-
-            if (result && !result.success) {
-              openModal('alert', 'Soal Tidak Dapat Dimuat', result.message || 'Terjadi kesalahan saat mengambil soal.');
-            }
-          })
-          .withFailureHandler(function (error) {
-            state.questions = [];
-            renderDashboard();
-            openModal('alert', 'Soal Tidak Dapat Dimuat', errorMessage(error));
-          })
-          .getKognitifQuestionsForApplicant(state.applicantId);
-      }
-
-      function loadClauses() {
-        google.script.run
-          .withSuccessHandler(function (result) {
-            state.clauses = result && result.success && Array.isArray(result.data) ? result.data : [];
-            renderDashboard();
-
-            if (result && !result.success) {
-              openModal('alert', 'Perjanjian Tidak Dapat Dimuat', result.message || 'Terjadi kesalahan saat mengambil perjanjian.');
-            }
-          })
-          .withFailureHandler(function (error) {
-            state.clauses = [];
-            renderDashboard();
-            openModal('alert', 'Perjanjian Tidak Dapat Dimuat', errorMessage(error));
-          })
-          .getOnboardingClausesForApplicant(state.applicantId);
+          .getApplicantPortalBundle(state.applicantId);
       }
 
       function goHome() {
