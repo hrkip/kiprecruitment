@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbzBpfKZPyR85lZBsmYGmDrpVualqsjofvZep5a8lYdAx6qzs7oQcItpG2QB5YD83VkG/exec';
+  const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbye10iCJKYg-GRxtmD0SUgbkaLPb7w9XDPN2BSCtRjPHinDTxCd7wzkoXrV4_Gf6ZvC/exec';
   const STORAGE_KEY = 'kip_gas_api_url';
   const CHANNEL = 'KIP_GAS_RPC';
   const BRIDGE_TIMEOUT_MS = 2500;
