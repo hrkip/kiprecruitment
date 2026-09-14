@@ -2,357 +2,791 @@
 <html lang="id">
 <head>
   <meta charset="UTF-8">
-
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
-  >
-
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#ffffff">
-
-  <title>Kampung Inggris Pontianak | Recruitment Portal</title>
-
-  <link rel="icon" href="./kip-logo.webp">
-  <link rel="preload" as="image" href="./kip-logo.webp">
-
-  <style>
+  <title>Portal Karir KIP</title>
+<link rel="preload" as="image" href="./kip-logo.webp">
+  <script>
+  (function (global) {
+    'use strict';
+  
+    const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbzW6JoqiNxlH89vH7FzGEw9NCTvYBCG8qAlCOYpQ_5Rrhp5JUSsMQR2ILLrfyUSEnN1/exec';
+    const CHANNEL = 'KIP_GAS_RPC';
+    const BRIDGE_TIMEOUT_MS = 2500;
+    const REQUEST_TIMEOUT_MS = 60000;
+  
+    const pending = new Map();
+    let sequence = 0;
+    let iframe = null;
+    let bridgeReady = false;
+    let readyPromise = null;
+    let resolveReady = null;
+  
+    function githubBaseUrl() {
+      return new URL('.', global.location.href).href;
+    }
+  
+    function bridgeUrl() {
+      const url = new URL(GAS_API_URL);
+      url.searchParams.set('page', 'bridge');
+      return url.href;
+    }
+  
+    function buildPageUrl(fileName) {
+      const value = String(fileName || '').trim();
+      const name = value.split('/').pop().split('?')[0].split('#')[0].toLowerCase();
+  
+      if (name === 'admin' || name === 'admin.html') {
+        const url = new URL(GAS_API_URL);
+        url.searchParams.set('page', 'admin');
+        url.searchParams.set('front', githubBaseUrl());
+        return url.href;
+      }
+  
+      if (name === 'pelamar' || name === 'pelamar.html') {
+        return new URL('Pelamar.html', githubBaseUrl()).href;
+      }
+  
+      return new URL('index.html', githubBaseUrl()).href;
+    }
+  
+    function markReady(value) {
+      bridgeReady = Boolean(value);
+      if (resolveReady) {
+        resolveReady(bridgeReady);
+        resolveReady = null;
+      }
+    }
+  
+    function ensureBridge() {
+      if (iframe) return;
+  
+      readyPromise = new Promise(function (resolve) {
+        resolveReady = resolve;
+      });
+  
+      iframe = document.createElement('iframe');
+      iframe.title = 'KIP Apps Script Bridge';
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.tabIndex = -1;
+      iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;border:0;left:-9999px;top:-9999px;';
+      iframe.src = bridgeUrl();
+  
+      (document.body || document.documentElement).appendChild(iframe);
+  
+      setTimeout(function () {
+        if (!bridgeReady) markReady(false);
+      }, BRIDGE_TIMEOUT_MS);
+    }
+  
+    global.addEventListener('message', function (event) {
+      if (!iframe || event.source !== iframe.contentWindow) return;
+  
+      const payload = event.data || {};
+      if (payload.channel !== CHANNEL) return;
+  
+      if (payload.type === 'ready') {
+        markReady(true);
+        return;
+      }
+  
+      if (payload.type !== 'response' || !pending.has(payload.id)) return;
+  
+      const item = pending.get(payload.id);
+      pending.delete(payload.id);
+      clearTimeout(item.timeoutId);
+  
+      if (payload.ok === true) item.resolve(payload.result);
+      else item.reject(new Error(payload.error || 'Apps Script request failed.'));
+    });
+  
+    async function waitForBridge() {
+      ensureBridge();
+      if (bridgeReady) return true;
+      if (!readyPromise) return false;
+      return readyPromise;
+    }
+  
+    function callThroughIframe(action, args) {
+      return new Promise(function (resolve, reject) {
+        if (!iframe || !iframe.contentWindow) {
+          reject(new Error('Apps Script bridge belum tersedia.'));
+          return;
+        }
+  
+        const id = 'kip-rpc-' + Date.now() + '-' + (++sequence);
+        const timeoutId = setTimeout(function () {
+          pending.delete(id);
+          reject(new Error('Permintaan Apps Script melewati batas waktu.'));
+        }, REQUEST_TIMEOUT_MS);
+  
+        pending.set(id, { resolve, reject, timeoutId });
+        iframe.contentWindow.postMessage({
+          channel: CHANNEL,
+          type: 'request',
+          id: id,
+          action: action,
+          args: args,
+          clientBaseUrl: githubBaseUrl()
+        }, '*');
+      });
+    }
+  
+    async function callThroughFetch(action, args) {
+      const formBody = new URLSearchParams();
+      formBody.set('payload', JSON.stringify({
+        action: action,
+        args: args,
+        clientBaseUrl: githubBaseUrl()
+      }));
+  
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      const timeoutId = controller
+        ? setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT_MS)
+        : null;
+  
+      try {
+        const response = await fetch(GAS_API_URL, {
+          method: 'POST',
+          body: formBody,
+          redirect: 'follow',
+          signal: controller ? controller.signal : undefined
+        });
+  
+        const text = await response.text();
+        let payload;
+        try { payload = JSON.parse(text); }
+        catch (error) { throw new Error('Respons GAS bukan JSON. Pastikan deployment berjalan sebagai pemilik dan akses diatur ke Anyone.'); }
+  
+        if (!payload || payload.ok !== true) {
+          throw new Error(payload && payload.error ? payload.error : 'Respons API tidak valid.');
+        }
+        return payload.result;
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
+    }
+  
+    async function call(action) {
+      const args = Array.prototype.slice.call(arguments, 1);
+      const isReady = await waitForBridge();
+  
+      if (isReady) {
+        try {
+          return await callThroughIframe(String(action), args);
+        } catch (iframeError) {
+          console.warn('KIP iframe bridge failed; trying fetch fallback.', iframeError);
+        }
+      }
+  
+      return callThroughFetch(String(action), args);
+    }
+  
+    function createRunner(successHandler, failureHandler) {
+      return new Proxy({}, {
+        get: function (_target, property) {
+          if (property === 'withSuccessHandler') {
+            return function (handler) { return createRunner(handler, failureHandler); };
+          }
+          if (property === 'withFailureHandler') {
+            return function (handler) { return createRunner(successHandler, handler); };
+          }
+  
+          return function () {
+            const args = Array.prototype.slice.call(arguments);
+            call.apply(null, [String(property)].concat(args))
+              .then(function (result) {
+                if (typeof successHandler === 'function') successHandler(result);
+              })
+              .catch(function (error) {
+                if (typeof failureHandler === 'function') failureHandler(error);
+                else if (typeof successHandler === 'function') successHandler({ success: false, message: error.message });
+                else console.error(error);
+              });
+          };
+        }
+      });
+    }
+  
+    global.KIP_API = Object.freeze({
+      url: GAS_API_URL,
+      call: call,
+      buildPageUrl: buildPageUrl,
+      ready: waitForBridge
+    });
+  
+    global.buildGitHubPageUrl = buildPageUrl;
+    global.google = global.google || {};
+    global.google.script = global.google.script || {};
+    global.google.script.run = createRunner(null, null);
+  
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', ensureBridge, { once: true });
+    } else {
+      ensureBridge();
+    }
+  })(window);
+  </script>
+<style>
     :root {
-      --red: #c81e1e;
       --ink: #111827;
       --muted: #6b7280;
       --line: #e5e7eb;
       --surface: #ffffff;
       --canvas: #f7f7f8;
+      --red: #c81e1e;
+      --red-dark: #991b1b;
+      --green: #047857;
+      --shadow: 0 20px 55px rgba(17, 24, 39, .09);
+      --radius: 18px;
     }
 
-    * {
-      box-sizing: border-box;
-    }
-
-    html,
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
-      width: 100%;
-      height: 100%;
       margin: 0;
-      padding: 0;
-      overflow: hidden;
-      background: var(--canvas);
-      font-family:
-        Inter,
-        ui-sans-serif,
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        sans-serif;
-    }
-
-    body {
-      position: relative;
-    }
-
-    #app-frame {
-      position: fixed;
-      inset: 0;
-
-      width: 100%;
-      height: 100%;
-
-      border: 0;
-      background: white;
-
-      opacity: 0;
-      transition: opacity .25s ease;
-    }
-
-    #app-frame.ready {
-      opacity: 1;
-    }
-
-    .loader {
-      position: fixed;
-      inset: 0;
-      z-index: 20;
-
-      display: grid;
-      place-items: center;
-
-      padding: 24px;
-
+      min-height: 100vh;
+      color: var(--ink);
       background:
-        radial-gradient(
-          circle at top right,
-          rgba(200, 30, 30, .08),
-          transparent 32%
-        ),
+        radial-gradient(circle at top right, rgba(200, 30, 30, .08), transparent 30%),
         var(--canvas);
-
-      transition:
-        opacity .25s ease,
-        visibility .25s ease;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-
-    .loader.hide {
-      opacity: 0;
-      visibility: hidden;
-      pointer-events: none;
-    }
-
-    .loader-card {
-      width: min(100%, 390px);
-
-      padding: 34px 28px;
-
-      text-align: center;
-
-      background: rgba(255, 255, 255, .97);
-
-      border: 1px solid var(--line);
-      border-radius: 24px;
-
-      box-shadow:
-        0 24px 70px rgba(17, 24, 39, .10);
-    }
-
-    .logo-box {
-      width: 170px;
-      height: 90px;
-
-      margin: 0 auto 20px;
-
+    button, input, select, textarea { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    .hidden { display: none !important; }
+    .page { width: min(100%, 1060px); margin: 0 auto; padding: 0 22px 60px; }
+    .nav {
+      min-height: 82px;
       display: flex;
       align-items: center;
-      justify-content: center;
-
-      background: #fff;
-
-      border: 1px solid var(--line);
-      border-radius: 18px;
-
-      overflow: hidden;
+      justify-content: space-between;
+      gap: 18px;
+      border-bottom: 1px solid var(--line);
     }
-
-    .logo-box img {
-      width: 100%;
-      height: 100%;
-
-      object-fit: contain;
-
-      padding: 7px;
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 900; }
+    .brand-mark {
+      width: 58px; height: 44px; border-radius: 12px;
+      display: grid; place-items: center; overflow: hidden;
+      background: #fff; border: 1px solid var(--line);
+      box-shadow: 0 8px 20px rgba(17,24,39,.12);
     }
-
-    h1 {
-      margin: 0;
-
-      font-size: 23px;
-      line-height: 1.25;
-
-      color: var(--ink);
-
-      letter-spacing: -.03em;
+    .brand-mark img { width: 100%; height: 100%; object-fit: contain; display: block; padding: 3px; }
+    .modal-icon.logo {
+      width: 118px; height: 70px; padding: 5px; background: #fff;
+      border: 1px solid var(--line); overflow: hidden;
     }
-
-    p {
-      margin: 9px 0 0;
-
-      color: var(--muted);
-
-      font-size: 14px;
-      line-height: 1.6;
+    .modal-icon.logo img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .nav-actions { display: flex; align-items: center; gap: 10px; }
+    .btn {
+      border: 0; border-radius: 12px; min-height: 44px; padding: 11px 17px;
+      font-weight: 800; cursor: pointer; transition: transform .15s ease, opacity .15s ease, background .15s ease;
+      text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
     }
-
-    .spinner {
-      width: 34px;
-      height: 34px;
-
-      margin: 24px auto 0;
-
-      border: 4px solid #e5e7eb;
-      border-top-color: var(--red);
-      border-radius: 50%;
-
-      animation: spin .7s linear infinite;
+    .btn:hover:not(:disabled) { transform: translateY(-1px); }
+    .btn:disabled { cursor: wait; opacity: .58; }
+    .btn-dark { background: var(--ink); color: white; }
+    .btn-red { background: var(--red); color: white; }
+    .btn-red:hover:not(:disabled) { background: var(--red-dark); }
+    .btn-light { background: #f3f4f6; color: #374151; }
+    .btn-green { background: var(--green); color: white; }
+    .link-btn { background: transparent; color: #4b5563; padding: 10px; }
+    .link-btn:hover { color: var(--red); }
+    .hero { text-align: center; padding: 56px 0 28px; }
+    .hero h1 { margin: 0; font-size: clamp(30px, 5vw, 48px); line-height: 1.05; letter-spacing: -.045em; }
+    .hero p { max-width: 620px; margin: 16px auto 0; color: var(--muted); line-height: 1.7; }
+    .accent { width: 72px; height: 5px; background: var(--red); border-radius: 999px; margin: 20px auto 0; }
+    .card {
+      width: min(100%, 760px); margin: 0 auto; padding: 30px;
+      border: 1px solid var(--line); background: rgba(255,255,255,.96); border-radius: 24px; box-shadow: var(--shadow);
     }
-
-    @keyframes spin {
-      to {
-        transform: rotate(360deg);
-      }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .field { display: grid; gap: 7px; }
+    .field.full { grid-column: 1 / -1; }
+    .label { font-size: 12px; font-weight: 900; text-transform: uppercase; letter-spacing: .08em; color: #4b5563; }
+    .required { color: var(--red); }
+    .control {
+      width: 100%; min-height: 48px; border: 1px solid #d1d5db; border-radius: 12px;
+      padding: 12px 14px; background: white; outline: none; transition: border .15s ease, box-shadow .15s ease;
     }
-
-    .fallback {
-      display: none;
-
-      margin-top: 22px;
+    textarea.control { min-height: 96px; resize: vertical; }
+    .control:focus { border-color: var(--red); box-shadow: 0 0 0 4px rgba(200,30,30,.09); }
+    .hint { margin: 0; color: #9ca3af; font-size: 12px; line-height: 1.5; }
+    .conditional {
+      grid-column: 1 / -1; padding: 18px; border-radius: 16px; border: 1px solid var(--line); background: #fafafa;
+      display: grid; gap: 18px;
     }
-
-    .fallback.show {
-      display: block;
-    }
-
-    .fallback a {
-      display: inline-flex;
-
-      min-height: 44px;
-
-      padding: 11px 18px;
-
-      align-items: center;
-      justify-content: center;
-
-      border-radius: 12px;
-
-      background: var(--red);
-
-      color: white;
-
-      text-decoration: none;
-
-      font-weight: 800;
-      font-size: 14px;
-    }
-
-    .fallback small {
-      display: block;
-
-      margin-top: 10px;
-
-      color: #9ca3af;
-
-      line-height: 1.5;
+    .audience-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .check-card { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: white; cursor: pointer; }
+    .check-card:hover { border-color: #fca5a5; }
+    .check-card input, .agreement input { width: 18px; height: 18px; accent-color: var(--red); flex: 0 0 auto; }
+    .agreement { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 12px; padding: 16px; border-radius: 14px; background: #fafafa; border: 1px solid var(--line); line-height: 1.65; font-size: 14px; color: #4b5563; }
+    .submit { grid-column: 1 / -1; width: 100%; min-height: 54px; }
+    .file-name { color: #374151; font-size: 12px; font-weight: 700; }
+    .backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 18px; background: rgba(17,24,39,.65); }
+    .modal { width: min(100%, 420px); background: white; border-radius: 22px; box-shadow: 0 30px 90px rgba(0,0,0,.28); padding: 26px; position: relative; }
+    .modal-close { position: absolute; right: 16px; top: 12px; border: 0; background: transparent; color: #9ca3af; font-size: 28px; cursor: pointer; }
+    .modal-icon { width: 58px; height: 58px; margin: 0 auto 13px; border-radius: 18px; display: grid; place-items: center; background: var(--ink); color: white; font-size: 22px; font-weight: 900; }
+    .modal h2 { text-align: center; margin: 0 0 18px; }
+    .modal-form { display: grid; gap: 14px; }
+    .status-message { min-height: 20px; text-align: center; font-size: 13px; font-weight: 800; }
+    .status-message.error { color: #b91c1c; }
+    .status-message.success { color: #047857; }
+    .result-modal { text-align: center; }
+    .result-symbol { width: 76px; height: 76px; margin: 0 auto 15px; display: grid; place-items: center; border-radius: 50%; font-size: 34px; }
+    .result-symbol.success { background: #d1fae5; color: #047857; }
+    .result-symbol.error { background: #fee2e2; color: #b91c1c; }
+    .result-modal h2 { margin: 0; }
+    .result-modal p { color: var(--muted); line-height: 1.65; }
+    .remember { display: flex; gap: 9px; align-items: center; font-size: 14px; color: #4b5563; }
+    .remember input { width: 17px; height: 17px; accent-color: var(--red); }
+    @media (max-width: 720px) {
+      .page { padding-left: 14px; padding-right: 14px; }
+      .brand-name { display: none; }
+      .nav-actions { gap: 3px; }
+      .btn { padding-left: 13px; padding-right: 13px; }
+      .card { padding: 20px; border-radius: 18px; }
+      .form-grid { grid-template-columns: 1fr; }
+      .field.full, .conditional, .agreement, .submit { grid-column: 1; }
+      .audience-grid { grid-template-columns: 1fr; }
+      .hero { padding-top: 38px; }
     }
   </style>
 </head>
-
 <body>
-
-  <div id="loader" class="loader">
-
-    <div class="loader-card">
-
-      <div class="logo-box">
-        <img
-          src="./kip-logo.webp"
-          alt="Kampung Inggris Pontianak"
-        >
+  <div class="page">
+    <nav class="nav">
+      <div class="brand">
+        <div class="brand-mark"><img src="./kip-logo.webp" alt="Kampung Inggris Pontianak"></div>
+        <span class="brand-name">Kampung Inggris Pontianak</span>
       </div>
-
-      <h1>KIP Recruitment Portal</h1>
-
-      <p>
-        Menghubungkan ke sistem rekrutmen
-        Kampung Inggris Pontianak...
-      </p>
-
-      <div class="spinner"></div>
-
-      <div id="fallback" class="fallback">
-
-        <a
-          id="open-direct"
-          href="#"
-          target="_blank"
-          rel="noopener"
-        >
-          Buka Portal
-        </a>
-
-        <small>
-          Jika portal tidak terbuka otomatis,
-          gunakan tombol di atas.
-        </small>
-
+      <div class="nav-actions">
+        <button class="btn link-btn" type="button" data-login="Pelamar">Login Pelamar</button>
+        <button class="btn btn-dark" type="button" data-login="Admin">Login Admin</button>
       </div>
+    </nav>
 
-    </div>
+    <header class="hero">
+      <h1>Formulir Aplikasi</h1>
+      <div class="accent"></div>
+      <p>Lengkapi data diri dan dokumen Anda. Sistem akan mengirim ID Pelamar setelah lamaran berhasil disimpan.</p>
+    </header>
 
+    <main class="card">
+      <form id="application-form" class="form-grid" novalidate>
+        <label class="field">
+          <span class="label">Full Name <span class="required">*</span></span>
+          <input class="control" type="text" name="Nama" autocomplete="name" required>
+        </label>
+
+        <label class="field">
+          <span class="label">Email <span class="required">*</span></span>
+          <input class="control" type="email" name="Email" autocomplete="email" required>
+        </label>
+
+        <label class="field full">
+          <span class="label">Address <span class="required">*</span></span>
+          <textarea class="control" name="Alamat" autocomplete="street-address" required></textarea>
+        </label>
+
+        <label class="field">
+          <span class="label">WA Number <span class="required">*</span></span>
+          <input class="control" type="tel" name="NoWA" inputmode="tel" autocomplete="tel" placeholder="081234567890" required>
+        </label>
+
+        <label class="field">
+          <span class="label">Social Media</span>
+          <input class="control" type="text" name="Social Media" placeholder="Instagram, TikTok, Facebook">
+        </label>
+
+        <label class="field full">
+          <span class="label">Position Applied <span class="required">*</span></span>
+          <select class="control" name="Posisi" id="position" required>
+            <option value="">Select position...</option>
+            <option value="English Trainer">English Trainer</option>
+            <option value="Admin">Admin</option>
+            <option value="Team Leader">Team Leader</option>
+          </select>
+        </label>
+
+        <section id="trainer-fields" class="conditional hidden" aria-hidden="true">
+          <div class="field">
+            <span class="label">Teaching Performance Audience <span class="required">*</span></span>
+            <div class="audience-grid" id="audience-grid">
+              <label class="check-card"><input type="checkbox" name="TeachingAudience" value="SD / Elementary School"><span>SD / Elementary School</span></label>
+              <label class="check-card"><input type="checkbox" name="TeachingAudience" value="Middle School"><span>Middle School</span></label>
+              <label class="check-card"><input type="checkbox" name="TeachingAudience" value="High School"><span>High School</span></label>
+              <label class="check-card"><input type="checkbox" name="TeachingAudience" value="Public / Adults"><span>Public / Adults</span></label>
+              <label class="check-card"><input type="checkbox" name="TeachingAudience" value="Academic (TOEFL / IELTS)"><span>Academic (TOEFL / IELTS)</span></label>
+            </div>
+          </div>
+
+          <label class="field">
+            <span class="label">English Proficiency Level</span>
+            <select class="control" name="Proficiency Level">
+              <option value="">Select proficiency level (optional)</option>
+              <option value="Basic">Basic</option>
+              <option value="Elementary">Elementary</option>
+              <option value="Pre-Intermediate">Pre-Intermediate</option>
+              <option value="Intermediate">Intermediate</option>
+              <option value="Upper-Intermediate">Upper-Intermediate</option>
+              <option value="Advanced">Advanced</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="label">Supporting Certificate</span>
+            <input class="control" type="file" id="certificate" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx">
+            <span class="file-name" id="certificate-name"></span>
+            <p class="hint">Optional. Maximum 5 MB.</p>
+          </label>
+        </section>
+
+        <label class="field full">
+          <span class="label">CV <span class="required">*</span></span>
+          <input class="control" type="file" id="cv" accept=".pdf,.doc,.docx" required>
+          <span class="file-name" id="cv-name"></span>
+          <p class="hint">Maximum 5 MB.</p>
+        </label>
+
+        <label class="field full">
+          <span class="label">Portfolio or LinkedIn URL</span>
+          <input class="control" type="url" name="Portofolio" placeholder="https://...">
+        </label>
+
+        <label class="agreement">
+          <input type="checkbox" name="agreement" required>
+          <span>Dengan ini saya menyatakan seluruh data dan dokumen yang dilampirkan benar dan dapat dipertanggungjawabkan. Saya bersedia mengikuti seluruh tahapan seleksi.</span>
+        </label>
+
+        <button id="submit-button" class="btn btn-red submit" type="submit">KIRIM LAMARAN</button>
+      </form>
+    </main>
   </div>
 
+  <div id="login-backdrop" class="backdrop hidden">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
+      <button class="modal-close" id="close-login" type="button" aria-label="Close">×</button>
+      <div class="modal-icon logo" id="login-icon"><img src="./kip-logo.webp" alt="KIP"></div>
+      <h2 id="login-title">Login Admin</h2>
+      <form id="login-form" class="modal-form">
+        <div id="admin-login-fields">
+          <label class="field">
+            <span class="label">Username</span>
+            <input class="control" id="admin-username" autocomplete="username" required>
+          </label>
+          <label class="field" style="margin-top:14px">
+            <span class="label">Password</span>
+            <input class="control" id="admin-password" type="password" autocomplete="current-password" required>
+          </label>
+          <label class="remember" style="margin-top:14px"><input type="checkbox" id="remember-admin"><span>Remember Me</span></label>
+        </div>
+        <div id="applicant-login-fields" class="hidden">
+          <label class="field">
+            <span class="label">ID Pelamar</span>
+            <input class="control" id="applicant-id" placeholder="PLM-171234567" autocomplete="off">
+          </label>
+        </div>
+        <button id="login-submit" class="btn btn-red" type="submit">Verifikasi Akun</button>
+        <a id="login-enter" class="btn btn-green hidden" href="#">✅ Mulai / Masuk</a>
+        <div id="login-status" class="status-message"></div>
+      </form>
+    </section>
+  </div>
 
-  <iframe
-    id="app-frame"
-    title="KIP Recruitment Portal"
-    allow="clipboard-read; clipboard-write"
-  ></iframe>
-
+  <div id="result-backdrop" class="backdrop hidden">
+    <section class="modal result-modal" role="alertdialog" aria-modal="true">
+      <div id="result-symbol" class="result-symbol success">✓</div>
+      <h2 id="result-title">Berhasil</h2>
+      <p id="result-message"></p>
+      <button id="close-result" class="btn btn-dark" type="button" style="width:100%">Tutup & Lanjutkan</button>
+    </section>
+  </div>
 
   <script>
     (function () {
       'use strict';
 
-      /*
-       * =====================================================
-       * REPLACE THIS WITH YOUR GOOGLE APPS SCRIPT /exec URL
-       * =====================================================
-       */
+      const MAX_FILE_BYTES = 5 * 1024 * 1024;
+      const state = {
+        files: { CV: null, Certificate: null },
+        loginType: 'Admin',
+        submitting: false,
+        loggingIn: false
+      };
 
-      const GAS_WEB_APP_URL =
-        'https://script.google.com/macros/s/AKfycbxUkKCjDDiXLZBgqoLek0N2VldnUKd5YDdpWZQV4kNoNZswqWA7NmF5uLIz65YD1_Hf/exec';
+      const form = document.getElementById('application-form');
+      const position = document.getElementById('position');
+      const trainerFields = document.getElementById('trainer-fields');
+      const submitButton = document.getElementById('submit-button');
+      const loginBackdrop = document.getElementById('login-backdrop');
+      const loginForm = document.getElementById('login-form');
+      const loginEnter = document.getElementById('login-enter');
+      const loginStatus = document.getElementById('login-status');
 
-
-      const frame =
-        document.getElementById('app-frame');
-
-      const loader =
-        document.getElementById('loader');
-
-      const fallback =
-        document.getElementById('fallback');
-
-      const directLink =
-        document.getElementById('open-direct');
-
-
-      function validGasUrl(url) {
-        return /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:[?#].*)?$/
-          .test(String(url || '').trim());
+      function showResult(type, title, message) {
+        const symbol = document.getElementById('result-symbol');
+        symbol.className = 'result-symbol ' + type;
+        symbol.textContent = type === 'success' ? '✓' : '!';
+        document.getElementById('result-title').textContent = title;
+        document.getElementById('result-message').textContent = message;
+        document.getElementById('result-backdrop').classList.remove('hidden');
       }
 
-
-      if (!validGasUrl(GAS_WEB_APP_URL)) {
-
-        document.querySelector('.spinner').style.display =
-          'none';
-
-        document.querySelector('.loader-card p').textContent =
-          'GAS Web App URL belum dikonfigurasi.';
-
-        return;
+      function closeResult() {
+        document.getElementById('result-backdrop').classList.add('hidden');
       }
 
+      function toggleTrainerFields() {
+        const visible = position.value === 'English Trainer';
+        trainerFields.classList.toggle('hidden', !visible);
+        trainerFields.setAttribute('aria-hidden', String(!visible));
+        if (!visible) {
+          document.querySelectorAll('input[name="TeachingAudience"]').forEach(function (input) {
+            input.checked = false;
+          });
+          state.files.Certificate = null;
+          document.getElementById('certificate').value = '';
+          document.getElementById('certificate-name').textContent = '';
+        }
+      }
 
-      directLink.href = GAS_WEB_APP_URL;
+      function readFile(file, fieldName, labelElement) {
+        return new Promise(function (resolve, reject) {
+          if (!file) {
+            state.files[fieldName] = null;
+            labelElement.textContent = '';
+            resolve(null);
+            return;
+          }
 
-      frame.src = GAS_WEB_APP_URL;
+          if (file.size > MAX_FILE_BYTES) {
+            reject(new Error(file.name + ' melebihi batas 5 MB.'));
+            return;
+          }
 
+          labelElement.textContent = file.name;
+          const reader = new FileReader();
+          reader.onerror = function () { reject(new Error('File gagal dibaca: ' + file.name)); };
+          reader.onload = function () {
+            const result = String(reader.result || '');
+            const commaIndex = result.indexOf(',');
+            const encoded = commaIndex >= 0 ? result.slice(commaIndex + 1) : '';
+            const value = { name: file.name, mimeType: file.type || 'application/octet-stream', data: encoded };
+            state.files[fieldName] = value;
+            resolve(value);
+          };
+          reader.readAsDataURL(file);
+        });
+      }
 
-      frame.addEventListener('load', function () {
+      async function handleFileInput(event, fieldName, labelId) {
+        const input = event.currentTarget;
+        try {
+          await readFile(input.files[0], fieldName, document.getElementById(labelId));
+        } catch (error) {
+          input.value = '';
+          state.files[fieldName] = null;
+          document.getElementById(labelId).textContent = '';
+          showResult('error', 'Berkas Tidak Valid', error.message);
+        }
+      }
 
-        frame.classList.add('ready');
+      function serializeApplication() {
+        const data = new FormData(form);
+        const payload = {};
+        ['Nama', 'Alamat', 'Email', 'NoWA', 'Social Media', 'Posisi', 'Proficiency Level', 'Portofolio'].forEach(function (key) {
+          payload[key] = String(data.get(key) || '').trim();
+        });
+        payload.agreement = data.get('agreement') === 'on';
+        payload.TeachingAudience = Array.from(document.querySelectorAll('input[name="TeachingAudience"]:checked'))
+          .map(function (input) { return input.value; })
+          .join(', ');
+        payload.CV = state.files.CV;
+        payload.Certificate = state.files.Certificate;
+        return payload;
+      }
 
-        setTimeout(function () {
-          loader.classList.add('hide');
-        }, 150);
+      async function submitApplication(event) {
+        event.preventDefault();
+        if (state.submitting) return;
 
-      });
-
-
-      /*
-       * Fallback shown if Google takes unusually long
-       * to render the GAS web app.
-       */
-
-      setTimeout(function () {
-
-        if (!frame.classList.contains('ready')) {
-          fallback.classList.add('show');
+        if (!form.reportValidity()) return;
+        if (!state.files.CV) {
+          showResult('error', 'Berkas Kurang', 'Harap unggah CV Anda.');
+          return;
+        }
+        if (position.value === 'English Trainer' && !document.querySelector('input[name="TeachingAudience"]:checked')) {
+          showResult('error', 'Pilihan Belum Lengkap', 'Pilih minimal satu Teaching Performance Audience.');
+          return;
         }
 
-      }, 7000);
+        state.submitting = true;
+        submitButton.disabled = true;
+        submitButton.textContent = 'MENGIRIM DATA...';
 
+        try {
+          const result = await KIP_API.call('processForm', serializeApplication());
+          if (!result || !result.success) {
+            throw new Error(result && result.message ? result.message : 'Respons server tidak valid.');
+          }
+
+          const emailInfo = result.candidateEmailSent
+            ? 'Email konfirmasi telah dikirim ke alamat email Anda.'
+            : 'Lamaran tersimpan, tetapi email konfirmasi belum berhasil dikirim. Tim HR tetap dapat melihat data Anda.';
+
+          showResult(
+            result.candidateEmailSent ? 'success' : 'error',
+            result.candidateEmailSent ? 'Lamaran Terkirim!' : 'Lamaran Tersimpan',
+            'ID Pelamar: ' + result.applicantId + '. ' + emailInfo
+          );
+
+          form.reset();
+          state.files = { CV: null, Certificate: null };
+          document.getElementById('cv-name').textContent = '';
+          document.getElementById('certificate-name').textContent = '';
+          toggleTrainerFields();
+        } catch (error) {
+          showResult('error', 'Pengiriman Gagal', error.message || String(error));
+        } finally {
+          state.submitting = false;
+          submitButton.disabled = false;
+          submitButton.textContent = 'KIRIM LAMARAN';
+        }
+      }
+
+      function safeGet(key) {
+        try { return localStorage.getItem(key) || ''; } catch (error) { return ''; }
+      }
+      function safeSet(key, value) {
+        try { localStorage.setItem(key, value); } catch (error) {}
+      }
+      function safeRemove(key) {
+        try { localStorage.removeItem(key); } catch (error) {}
+      }
+
+      function openLogin(type) {
+        state.loginType = type;
+        state.loggingIn = false;
+        loginBackdrop.classList.remove('hidden');
+        loginStatus.textContent = '';
+        loginStatus.className = 'status-message';
+        loginEnter.classList.add('hidden');
+        document.getElementById('login-submit').classList.remove('hidden');
+        document.getElementById('login-title').textContent = 'Login ' + type;
+        document.getElementById('login-icon').innerHTML = '<img src="./kip-logo.webp" alt="KIP">';
+        document.getElementById('admin-login-fields').classList.toggle('hidden', type !== 'Admin');
+        document.getElementById('applicant-login-fields').classList.toggle('hidden', type === 'Admin');
+
+        const adminUsername = document.getElementById('admin-username');
+        const adminPassword = document.getElementById('admin-password');
+        const rememberAdmin = document.getElementById('remember-admin');
+        const applicantIdField = document.getElementById('applicant-id');
+        const adminActive = type === 'Admin';
+
+        adminUsername.disabled = !adminActive;
+        adminPassword.disabled = !adminActive;
+        rememberAdmin.disabled = !adminActive;
+        adminUsername.required = adminActive;
+        adminPassword.required = adminActive;
+
+        applicantIdField.disabled = adminActive;
+        applicantIdField.required = !adminActive;
+
+        if (type === 'Admin') {
+          document.getElementById('admin-username').value = safeGet('hr_username');
+          document.getElementById('admin-password').value = safeGet('hr_password');
+          document.getElementById('remember-admin').checked = Boolean(safeGet('hr_username') && safeGet('hr_password'));
+          setTimeout(function () { document.getElementById('admin-username').focus(); }, 0);
+        } else {
+          document.getElementById('applicant-id').value = '';
+          setTimeout(function () { document.getElementById('applicant-id').focus(); }, 0);
+        }
+      }
+
+      function closeLogin() {
+        loginBackdrop.classList.add('hidden');
+      }
+
+      async function submitLogin(event) {
+        event.preventDefault();
+        if (state.loggingIn) return;
+        state.loggingIn = true;
+        const button = document.getElementById('login-submit');
+        button.disabled = true;
+        button.textContent = 'Memverifikasi...';
+        loginStatus.textContent = '';
+
+        try {
+          let result;
+          let nextPage;
+          if (state.loginType === 'Admin') {
+            const username = document.getElementById('admin-username').value.trim();
+            const password = document.getElementById('admin-password').value;
+            if (!username || !password) throw new Error('Username dan password wajib diisi.');
+            result = await KIP_API.call('verifyAdminLogin', username, password);
+            nextPage = 'Admin.html';
+
+            if (result && result.success) {
+              if (document.getElementById('remember-admin').checked) {
+                safeSet('hr_username', username);
+                safeSet('hr_password', password);
+              } else {
+                safeRemove('hr_username');
+                safeRemove('hr_password');
+              }
+            }
+          } else {
+            const applicantId = document.getElementById('applicant-id').value.trim().toUpperCase();
+            if (!applicantId) throw new Error('ID Pelamar wajib diisi.');
+            result = await KIP_API.call('verifyPelamarLogin', applicantId);
+            nextPage = 'Pelamar.html';
+            if (result && result.success) safeSet('id_pelamar_aktif', applicantId);
+          }
+
+          if (!result || !result.success) {
+            throw new Error(result && result.message ? result.message : 'Akun tidak valid.');
+          }
+
+          const destination = KIP_API.buildPageUrl(nextPage);
+          loginStatus.className = 'status-message success';
+          loginStatus.textContent = 'Verifikasi berhasil. Membuka portal...';
+          loginEnter.href = destination;
+          loginEnter.classList.remove('hidden');
+          loginEnter.textContent = 'Buka Portal Sekarang';
+          button.classList.add('hidden');
+
+          // Direct navigation makes the verification button complete the login flow.
+          // The visible link remains as a fallback if browser navigation is interrupted.
+          window.setTimeout(function () {
+            window.location.assign(destination);
+          }, 180);
+        } catch (error) {
+          loginStatus.className = 'status-message error';
+          loginStatus.textContent = error.message || String(error);
+        } finally {
+          state.loggingIn = false;
+          button.disabled = false;
+          button.textContent = 'Verifikasi Akun';
+        }
+      }
+
+      position.addEventListener('change', toggleTrainerFields);
+      document.getElementById('cv').addEventListener('change', function (event) { handleFileInput(event, 'CV', 'cv-name'); });
+      document.getElementById('certificate').addEventListener('change', function (event) { handleFileInput(event, 'Certificate', 'certificate-name'); });
+      form.addEventListener('submit', submitApplication);
+      document.querySelectorAll('[data-login]').forEach(function (button) {
+        button.addEventListener('click', function () { openLogin(button.dataset.login); });
+      });
+      document.getElementById('close-login').addEventListener('click', closeLogin);
+      loginBackdrop.addEventListener('click', function (event) { if (event.target === loginBackdrop) closeLogin(); });
+      loginForm.addEventListener('submit', submitLogin);
+      document.getElementById('close-result').addEventListener('click', closeResult);
+      document.getElementById('result-backdrop').addEventListener('click', function (event) {
+        if (event.target.id === 'result-backdrop') closeResult();
+      });
+      toggleTrainerFields();
     })();
   </script>
-
 </body>
 </html>
